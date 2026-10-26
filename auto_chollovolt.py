@@ -1,24 +1,17 @@
 import os
-import re
 import time
-import random
-import requests
-from bs4 import BeautifulSoup
 from PIL import Image, ImageDraw, ImageFont
+from playwright.sync_api import sync_playwright
 
 # ==============================================================================
 # CONFIGURACIÓN Y SECRETS
 # ==============================================================================
 AMAZON_TAG = os.getenv("AMAZON_TAG", "librospsico08-21")
+X_USER = os.getenv("X_USER", "")
+X_PASS = os.getenv("X_PASS", "")
+
 ARCHIVO_HISTORIAL = "historial_publicados.txt"
 
-HEADERS_WEB = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-    "Accept-Language": "es-ES,es;q=0.9",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
-}
-
-# Chollos de respaldo verificados en Amazon España
 CHOLLOS_RESPALDO = [
     {"asin": "B09B8W5V33", "descuento": "-35%", "precio_actual": "29,99", "precio_antes": "46,99"},
     {"asin": "B091HWBBNF", "descuento": "-40%", "precio_actual": "24,99", "precio_antes": "41,99"},
@@ -42,7 +35,6 @@ def obtener_siguiente_chollo():
     for item in CHOLLOS_RESPALDO:
         if item["asin"] not in historial:
             return item
-    # Si se usaron todos, reiniciamos historial
     if os.path.exists(ARCHIVO_HISTORIAL):
         os.remove(ARCHIVO_HISTORIAL)
     return CHOLLOS_RESPALDO[0]
@@ -100,21 +92,74 @@ def crear_imagen_chollo(descuento: str, precio_actual: str, precio_antes: str, r
     img.save(ruta_salida, quality=95)
     return ruta_salida
 
+# ==============================================================================
+# PUBLICACIÓN AUTOMÁTICA EN LA WEB DE X (SIN API DE PAGO)
+# ==============================================================================
+def publicar_en_web_x(ruta_imagen: str, texto_tuit: str):
+    if not X_USER or not X_PASS:
+        print("❌ Faltan los secretos X_USER o X_PASS en GitHub.")
+        return False
+
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page(viewport={"width": 1280, "height": 800})
+            
+            print("🌐 Entrando en Twitter (X)...")
+            page.goto("https://twitter.com/login", timeout=60000)
+            time.sleep(5)
+
+            # Introducir usuario
+            page.fill("input[autocomplete='username']", X_USER)
+            page.keyboard.press("Enter")
+            time.sleep(3)
+
+            # Introducir contraseña
+            page.fill("input[autocomplete='current-password']", X_PASS)
+            page.keyboard.press("Enter")
+            time.sleep(6)
+
+            print("✍️ Escribiendo tuit...")
+            page.goto("https://twitter.com/compose/post", timeout=60000)
+            time.sleep(5)
+
+            # Escribir texto del tuit en la caja de texto
+            editor = page.locator("div[aria-label='Post text'], div[aria-label='Texto del post']").first
+            editor.click()
+            editor.fill(texto_tuit)
+            time.sleep(2)
+
+            # Adjuntar imagen
+            print("🖼️ Adjuntando imagen corporativa...")
+            file_input = page.locator("input[data-testid='fileInput']")
+            file_input.set_input_files(ruta_imagen)
+            time.sleep(4)
+
+            # Publicar
+            print("🚀 Publicando tuit...")
+            post_btn = page.locator("data-testid=tweetButton, [data-testid='tweetButtonInline']").first
+            post_btn.click()
+            time.sleep(5)
+
+            print("✅ ¡Tuit publicado correctamente en la web de X!")
+            browser.close()
+            return True
+    except Exception as e:
+        print(f"❌ Error en la automatización web de X: {e}")
+        return False
+
 def main():
-    print("⚡ Generador automático de CholloVolt en marcha...")
+    print("⚡ Iniciando automatización web de CholloVolt...")
     chollo = obtener_siguiente_chollo()
 
     asin = chollo["asin"]
-    enlace = generar_enlace_afiliado(asin)
-    texto_tuit = f"🔥 {chollo['descuento']} de descuento 🔥\n🛒 {enlace}\n\n#chollos #amazon #ofertas #chollo"
-    
-    print(f"\n--- TUIT GENERADO ---\n{texto_tuit}\n---------------------")
+    enlace = gen_enlace = f"https://www.amazon.es/dp/{asin}?tag={AMAZON_TAG}"
+    texto_tuit = f"🔥 {chollo['descuento']} de descuento 🔥\n🛒 {gen_enlace}\n\n#chollos #amazon #ofertas #chollo"
     
     ruta_img = crear_imagen_chollo(chollo['descuento'], chollo['precio_actual'], chollo['precio_antes'], "chollo.jpg")
-    print(f"🖼️ Imagen de oferta creada con éxito: {ruta_img}")
     
-    guardar_en_historial(asin)
-    print("✅ Proceso completado sin errores de pasarela de pago.")
+    if publicar_en_web_x(ruta_img, texto_tuit):
+        guardar_en_historial(asin)
 
 if __name__ == "__main__":
     main()
