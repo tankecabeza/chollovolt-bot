@@ -70,7 +70,7 @@ def obtener_datos_reales_amazon(asin: str):
                     if p_ant > p_act:
                         pct = int(round((1 - (p_act / p_ant)) * 100))
                         descuento = f"-{pct}%"
-                except:
+                except Exception:
                     descuento = "-30%"
             return {
                 "asin": asin,
@@ -83,10 +83,9 @@ def obtener_datos_reales_amazon(asin: str):
     return None
 
 # ==============================================================================
-# RASTREADOR MULTIFUENTE AGRESIVO (SAVEMONEY + TELEGRAM)
+# RASTREADOR MULTIFUENTE AGRESIVO
 # ==============================================================================
 def rastrear_chollos_agresivo():
-    # Webs de SaveMoney y visores web de canales de Telegram de chollos
     fuentes = [
         "https://savemoney.es/chollos",
         "https://t.me/s/chollos", 
@@ -100,7 +99,6 @@ def rastrear_chollos_agresivo():
     for url in fuentes:
         try:
             r = requests.get(url, headers=HEADERS_WEB, timeout=15)
-            # Escáner agresivo: Busca CUALQUIER ASIN de Amazon en todo el código fuente
             matches = re.findall(r'(B[A-Z0-9]{9})', r.text)
             for asin in matches:
                 if asin not in historial and asin not in asins_encontrados:
@@ -109,8 +107,6 @@ def rastrear_chollos_agresivo():
             print(f"Fallo al leer la fuente {url}: {e}")
 
     print(f"🎯 Escáner completado: ¡{len(asins_encontrados)} ASINs nuevos encontrados!")
-    
-    # Desordenamos la lista para que no coja siempre lo mismo de la misma web
     random.shuffle(asins_encontrados)
 
     for asin in asins_encontrados:
@@ -137,7 +133,7 @@ def cargar_fuente(tamano: int, negrita: bool = False):
         if os.path.exists(r):
             try:
                 return ImageFont.truetype(r, tamano)
-            except:
+            except Exception:
                 pass
     return ImageFont.load_default()
 
@@ -196,3 +192,26 @@ def publicar_en_x(ruta_imagen: str, texto_tuit: str):
         resp = client_v2.create_tweet(text=texto_tuit, media_ids=[media.media_id])
         print(f"✅ Tuit publicado con éxito! ID: {resp.data['id']}")
         return True
+    except Exception as e:
+        print(f"❌ Error publicando en X: {e}")
+        return False
+
+def main():
+    print("⚡ Iniciando barrido automático de CholloVolt...")
+    chollo = rastrear_chollos_agresivo()
+
+    if not chollo:
+        print("No se encontraron ofertas activas en Amazon tras el escaneo.")
+        return
+
+    asin = chollo["asin"]
+    texto_tuit = f"🔥 {chollo['descuento']} de descuento 🔥\n🛒 {generar_enlace_afiliado(asin)}\n\n#chollos #amazon #ofertas"
+    
+    print(f"Preparando publicación:\n{texto_tuit}")
+    ruta_img = crear_imagen_chollo(chollo['descuento'], chollo['precio_actual'], chollo['precio_antes'], "chollo.jpg")
+
+    if publicar_en_x(ruta_img, texto_tuit):
+        guardar_en_historial(asin)
+
+if __name__ == "__main__":
+    main()
