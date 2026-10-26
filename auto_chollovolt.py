@@ -93,7 +93,7 @@ def crear_imagen_chollo(descuento: str, precio_actual: str, precio_antes: str, r
     return ruta_salida
 
 # ==============================================================================
-# PUBLICACIÓN AUTOMÁTICA EN LA WEB DE X (SIN API DE PAGO)
+# AUTOMATIZACIÓN WEB ROBUSTA EN X
 # ==============================================================================
 def publicar_en_web_x(ruta_imagen: str, texto_tuit: str):
     if not X_USER or not X_PASS:
@@ -102,46 +102,53 @@ def publicar_en_web_x(ruta_imagen: str, texto_tuit: str):
 
     try:
         with sync_playwright() as p:
+            # Usar user-agent real para evitar detección de bot básico
             browser = p.chromium.launch(headless=True)
-            page = browser.new_page(viewport={"width": 1280, "height": 800})
+            context = browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+                viewport={"width": 1280, "height": 800}
+            )
+            page = context.new_page()
             
-            print("🌐 Entrando en Twitter (X)...")
-            page.goto("https://twitter.com/login", timeout=60000)
-            time.sleep(5)
+            print("🌐 Entrando en la página de acceso de X...")
+            page.goto("https://x.com/i/flow/login", timeout=60000)
+            time.sleep(7)
 
-            # Introducir usuario
+            print("✍️ Introduciendo usuario...")
+            page.wait_for_selector("input[autocomplete='username']", timeout=15000)
             page.fill("input[autocomplete='username']", X_USER)
             page.keyboard.press("Enter")
-            time.sleep(3)
+            time.sleep(4)
 
-            # Introducir contraseña
+            print("🔑 Introduciendo contraseña...")
+            page.wait_for_selector("input[autocomplete='current-password']", timeout=15000)
             page.fill("input[autocomplete='current-password']", X_PASS)
             page.keyboard.press("Enter")
+            time.sleep(8)
+
+            print("✍️ Abriendo el compositor de tuits...")
+            page.goto("https://twitter.com/compose/post", timeout=60000)
             time.sleep(6)
 
-            print("✍️ Escribiendo tuit...")
-            page.goto("https://twitter.com/compose/post", timeout=60000)
-            time.sleep(5)
-
-            # Escribir texto del tuit en la caja de texto
+            # Escribir el texto
             editor = page.locator("div[aria-label='Post text'], div[aria-label='Texto del post']").first
             editor.click()
             editor.fill(texto_tuit)
-            time.sleep(2)
+            time.sleep(3)
 
             # Adjuntar imagen
-            print("🖼️ Adjuntando imagen corporativa...")
+            print("🖼️ Adjuntando tarjeta de oferta...")
             file_input = page.locator("input[data-testid='fileInput']")
             file_input.set_input_files(ruta_imagen)
-            time.sleep(4)
+            time.sleep(5)
 
             # Publicar
             print("🚀 Publicando tuit...")
-            post_btn = page.locator("data-testid=tweetButton, [data-testid='tweetButtonInline']").first
+            post_btn = page.locator("[data-testid='tweetButton'], [data-testid='tweetButtonInline']").first
             post_btn.click()
-            time.sleep(5)
+            time.sleep(6)
 
-            print("✅ ¡Tuit publicado correctamente en la web de X!")
+            print("✅ ¡Tuit publicado con éxito en X!")
             browser.close()
             return True
     except Exception as e:
@@ -149,12 +156,12 @@ def publicar_en_web_x(ruta_imagen: str, texto_tuit: str):
         return False
 
 def main():
-    print("⚡ Iniciando automatización web de CholloVolt...")
+    print("⚡ Iniciando automatización web avanzada de CholloVolt...")
     chollo = obtener_siguiente_chollo()
 
     asin = chollo["asin"]
-    enlace = gen_enlace = f"https://www.amazon.es/dp/{asin}?tag={AMAZON_TAG}"
-    texto_tuit = f"🔥 {chollo['descuento']} de descuento 🔥\n🛒 {gen_enlace}\n\n#chollos #amazon #ofertas #chollo"
+    enlace = generar_enlace_afiliado(asin)
+    texto_tuit = f"🔥 {chollo['descuento']} de descuento 🔥\n🛒 {enlace}\n\n#chollos #amazon #ofertas #chollo"
     
     ruta_img = crear_imagen_chollo(chollo['descuento'], chollo['precio_actual'], chollo['precio_antes'], "chollo.jpg")
     
