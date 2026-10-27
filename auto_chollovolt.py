@@ -1,6 +1,7 @@
 import os
 import sys
 import json
+import re
 from PIL import Image, ImageDraw, ImageFont
 from playwright.sync_api import sync_playwright
 
@@ -8,16 +9,17 @@ from playwright.sync_api import sync_playwright
 # CONFIGURACIÓN Y SECRETS
 # ==============================================================================
 AMAZON_TAG = os.getenv("AMAZON_TAG", "librospsico08-21")
-X_STATE = os.getenv("X_STATE", "")  # contenido de x_state.json (secret de GitHub)
+X_STATE = os.getenv("X_STATE", "")
 
 ARCHIVO_HISTORIAL = "historial_publicados.txt"
 
-CHOLLOS_RESPALDO = [
-    {"asin": "B09B8W5V33", "descuento": "-35%", "precio_actual": "29,99", "precio_antes": "46,99"},
-    {"asin": "B091HWBBNF", "descuento": "-40%", "precio_actual": "24,99", "precio_antes": "41,99"},
-    {"asin": "B08C1W5N81", "descuento": "-50%", "precio_actual": "19,99", "precio_antes": "39,99"},
-    {"asin": "B07WJYV738", "descuento": "-45%", "precio_actual": "34,99", "precio_antes": "63,99"},
-    {"asin": "B09G3HRMVB", "descuento": "-30%", "precio_actual": "49,99", "precio_antes": "71,99"},
+# Categorías de Amazon España donde hay chollos reales constantemente
+URLS_RASTREO = [
+    "https://www.amazon.es/gp/movers-and-shakers/electronics",
+    "https://www.amazon.es/gp/bestsellers/electronics",
+    "https://www.amazon.es/gp/bestsellers/kitchen",
+    "https://www.amazon.es/gp/bestsellers/computers",
+    "https://www.amazon.es/gp/bestsellers/videogames",
 ]
 
 
@@ -33,18 +35,91 @@ def guardar_en_historial(asin: str):
         f.write(f"{asin}\n")
 
 
-def obtener_siguiente_chollo():
-    historial = cargar_historial()
-    for item in CHOLLOS_RESPALDO:
-        if item["asin"] not in historial:
-            return item
-    if os.path.exists(ARCHIVO_HISTORIAL):
-        os.remove(ARCHIVO_HISTORIAL)
-    return CHOLLOS_RESPALDO[0]
-
-
 def generar_enlace_afiliado(asin: str):
     return f"https://www.amazon.es/dp/{asin}?tag={AMAZON_TAG}"
+
+
+def limpiar_precio(texto: str):
+    if not texto:
+        return None
+    m = re.search(r"(\d+[.,]\d{2})", texto)
+    return m.group(1).replace(".", ",") if m else None
+
+
+def buscar_chollo_real_amazon(page):
+    """Rastrea Amazon.es en tiempo real buscando un producto activo con descuento."""
+    historial = cargar_historial()
+
+    for url in URLS_RASTREO:
+        print(f"🔎 Buscando ofertas activas en: {url}")
+        try:
+            page.goto(url, timeout=45000)
+            page.wait_for_timeout(2000)
+
+            # Cerrar cookies de Amazon si aparecen
+            try:
+                btn_cookies = page.locator("#sp-cc-accept")
+                if btn_cookies.is_visible(timeout=2000):
+                    btn_cookies.click()
+            except Exception:
+                pass
+
+            # Extraer todos los ASINs visibles en la página de ranking
+            enlaces = page.locator("a[href*='/dp/']").all()
+            asins_vistos = []
+            for a in enlaces:
+                href = a.get_attribute("href") or ""
+                m = re.search(r"/dp/([A-Z0-9]{10})", href)
+                if m:
+                    asin = m.group(1)
+                    if asin not in historial and asin not in asins_vistos:
+                        asins_vistos.append(asin)
+
+            # Analizar los candidatos entrando en su ficha real
+            for asin in asins_vistos[:12]:
+                url_prod = f"https://www.amazon.es/dp/{asin}"
+                page.goto(url_prod, timeout=30000)
+                page.wait_for_timeout(1500)
+
+                # Comprobar que la página existe y tiene título
+                if page.locator("#productTitle").count() == 0:
+                    continue
+
+                titulo = page.locator("#productTitle").first.inner_text().strip()
+
+                # Buscar descuento (ej. -25%)
+                descuento = None
+                loc_desc = page.locator(".savingsPercentage").first
+                if loc_desc.count() > 0 and loc_desc.is_visible():
+                    descuento = loc_desc.inner_text().strip()
+
+                # Buscar precio actual
+                precio_actual = None
+                loc_precio = page.locator("#corePriceDisplay_desktop_feature_div .a-price .a-offscreen, .a-price .a-offscreen").first
+                if loc_precio.count() > 0:
+                    precio_actual = limpiar_precio(loc_precio.inner_text())
+
+                # Buscar precio anterior / recomendado
+                precio_antes = None
+                loc_antes = page.locator(".basisPrice .a-offscreen, .a-text-price .a-offscreen").first
+                if loc_antes.count() > 0:
+                    precio_antes = limpiar_precio(loc_antes.inner_text())
+
+                # Si tiene descuento y ambos precios reales, nos lo quedamos
+                if descuento and precio_actual and precio_antes:
+                    print(f"🎯 ¡Chollo real encontrado! {asin} | {descuento} | {precio_actual}€ (Antes: {precio_antes}€)")
+                    return {
+                        "asin": asin,
+                        "titulo": titulo[:85] + "..." if len(titulo) > 85 else titulo,
+                        "descuento": descuento,
+                        "precio_actual": precio_actual,
+                        "precio_antes": precio_antes,
+                    }
+        except Exception as e:
+            print(f"⚠️ Aviso rastreando {url}: {e}")
+            continue
+
+    raise RuntimeError("No se encontró ningún chollo con descuento activo en este pase.")
 
 
 def cargar_fuente(tamano: int, negrita: bool = False):
@@ -99,10 +174,7 @@ def crear_imagen_chollo(descuento, precio_actual, precio_antes, ruta_salida):
     return ruta_salida
 
 
-# ==============================================================================
-# PUBLICACIÓN EN LA WEB DE X USANDO SESIÓN GUARDADA
-# ==============================================================================
-def publicar_en_web_x(ruta_imagen: str, texto_tuit: str) -> bool:
+def ejecutar_bot():
     if not X_STATE:
         print("❌ Falta el secret X_STATE (contenido de x_state.json).")
         return False
@@ -110,7 +182,7 @@ def publicar_en_web_x(ruta_imagen: str, texto_tuit: str) -> bool:
     try:
         estado = json.loads(X_STATE)
     except json.JSONDecodeError:
-        print("❌ X_STATE no es un JSON válido. Copia el contenido COMPLETO de x_state.json.")
+        print("❌ X_STATE no es un JSON válido.")
         return False
 
     with sync_playwright() as p:
@@ -123,13 +195,29 @@ def publicar_en_web_x(ruta_imagen: str, texto_tuit: str) -> bool:
         )
         page = context.new_page()
         try:
+            # 1. Buscar un chollo real y verificar que existe en Amazon.es
+            chollo = buscar_chollo_real_amazon(page)
+            asin = chollo["asin"]
+            enlace = generar_enlace_afiliado(asin)
+            texto_tuit = (
+                f"🔥 {chollo['descuento']} de descuento 🔥\n"
+                f"📦 {chollo['titulo']}\n"
+                f"💰 Ahora: {chollo['precio_actual']}€ (Antes: {chollo['precio_antes']}€)\n"
+                f"🛒 {enlace}\n\n"
+                f"#chollos #amazon #ofertas #chollo"
+            )
+
+            ruta_img = crear_imagen_chollo(
+                chollo["descuento"], chollo["precio_actual"], chollo["precio_antes"], "chollo.jpg"
+            )
+
+            # 2. Publicar en X
             print("🌐 Abriendo X con la sesión guardada...")
             page.goto("https://x.com/compose/post", timeout=60000)
 
             if "login" in page.url or "i/flow" in page.url:
                 raise RuntimeError("La sesión ha caducado o X pide verificación. Genera x_state.json de nuevo.")
 
-            # Cerrar banner de cookies si está tapando la interfaz
             for texto in ["Aceptar todas las cookies", "Accept all cookies",
                           "Rechazar cookies no esenciales", "Refuse non-essential cookies"]:
                 try:
@@ -146,9 +234,8 @@ def publicar_en_web_x(ruta_imagen: str, texto_tuit: str) -> bool:
             page.keyboard.insert_text(texto_tuit)
 
             print("🖼️ Adjuntando imagen...")
-            page.locator("input[data-testid='fileInput']").first.set_input_files(ruta_imagen)
+            page.locator("input[data-testid='fileInput']").first.set_input_files(ruta_img)
             page.locator("[data-testid='attachments']").wait_for(timeout=30000)
-            # Espera necesaria para que X termine de subir la imagen al servidor y active el botón
             page.wait_for_timeout(4000)
 
             print("🚀 Publicando...")
@@ -165,13 +252,13 @@ def publicar_en_web_x(ruta_imagen: str, texto_tuit: str) -> bool:
                     editor.focus()
                     page.keyboard.press("Control+Enter")
 
-            # Tras publicar, desaparece el cuadro de redacción
             editor.wait_for(state="detached", timeout=30000)
-
-            print("✅ Tuit publicado.")
+            print("✅ Tuit publicado con enlace 100% verificado.")
+            guardar_en_historial(asin)
             return True
+
         except Exception as e:
-            print(f"❌ Error publicando en X: {e}")
+            print(f"❌ Error en el proceso: {e}")
             try:
                 page.screenshot(path="error.png", full_page=True)
                 print("📸 Captura guardada en error.png")
@@ -182,23 +269,7 @@ def publicar_en_web_x(ruta_imagen: str, texto_tuit: str) -> bool:
             browser.close()
 
 
-def main():
-    print("⚡ Iniciando CholloVolt...")
-    chollo = obtener_siguiente_chollo()
-
-    asin = chollo["asin"]
-    enlace = generar_enlace_afiliado(asin)
-    texto_tuit = f"🔥 {chollo['descuento']} de descuento 🔥\n🛒 {enlace}\n\n#chollos #amazon #ofertas #chollo"
-
-    ruta_img = crear_imagen_chollo(
-        chollo["descuento"], chollo["precio_actual"], chollo["precio_antes"], "chollo.jpg"
-    )
-
-    if publicar_en_web_x(ruta_img, texto_tuit):
-        guardar_en_historial(asin)
-    else:
-        sys.exit(1)  # que el workflow salga en ROJO si no se publicó
-
-
 if __name__ == "__main__":
-    main()
+    print("⚡ Iniciando CholloVolt con rastreador en vivo...")
+    if not ejecutar_bot():
+        sys.exit(1)
