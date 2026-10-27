@@ -2,11 +2,26 @@ name: Bot Automatico CholloVolt
 
 on:
   schedule:
-    - cron: '0 8,10,12,14,16,18,20,22 * * *'
+    # Horario "humano" salpicado y caótico (horas UTC)
+    - cron: '15 8 * * *'   # 08:15
+    - cron: '42 9 * * *'   # 09:42 (1h 27m después)
+    - cron: '05 11 * * *'  # 11:05 (1h 23m después)
+    - cron: '30 12 * * *'  # 12:30 (1h 25m después)
+    - cron: '18 14 * * *'  # 14:18 (1h 48m después)
+    - cron: '55 15 * * *'  # 15:55 (1h 37m después)
+    - cron: '22 17 * * *'  # 17:22 (1h 27m después)
+    - cron: '45 18 * * *'  # 18:45 (1h 23m después)
+    - cron: '10 20 * * *'  # 20:10 (1h 25m después)
+    - cron: '37 21 * * *'  # 21:37 (1h 27m después)
   workflow_dispatch:
 
 permissions:
   contents: write
+
+# Evita que dos ejecuciones (manual y programada) se pisen
+concurrency:
+  group: publicar-chollo
+  cancel-in-progress: false
 
 jobs:
   publicar-chollo:
