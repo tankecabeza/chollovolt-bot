@@ -36,88 +36,163 @@ def generar_enlace_afiliado(asin: str):
     return f"https://www.amazon.es/dp/{asin}?tag={AMAZON_TAG}"
 
 def limpiar_precio(texto: str):
+    """Normaliza precios españoles como 1.234,56 €, 1234.56 o 99,99."""
     if not texto:
         return None
-    m = re.search(r"(\d+[.,]\d{2})", texto)
-    return m.group(1).replace(".", ",") if m else None
+    coincidencias = re.findall(r"(?<!\d)(?:\d{1,3}(?:\.\d{3})+|\d+)[,.]\d{2}(?!\d)", texto)
+    if not coincidencias:
+        return None
+    valor = coincidencias[-1].replace(".", "").replace(",", ".")
+    try:
+        return f"{float(valor):.2f}".replace(".", ",")
+    except ValueError:
+        return None
+
+
+def porcentaje_descuento(texto: str):
+    if not texto:
+        return None
+    m = re.search(r"(\d{1,3})\s*%", texto.replace("−", "-"))
+    if not m:
+        return None
+    valor = int(m.group(1))
+    return valor if 0 < valor <= 99 else None
+
 
 def buscar_chollo_real_amazon(page):
+    """
+    Busca candidatos en varias listas y solo acepta descuentos >= 25 %.
+    Los descuentos muy altos se priorizan como posibles errores de precio,
+    pero solo un historial de precios externo permite confirmar que lo sean.
+    """
     historial = cargar_historial()
+    candidatos = []
+    vistos = set()
 
+    # Primero recogemos ASIN de las listas; no abrimos todos los productos.
     for url in URLS_RASTREO:
-        print(f"🔎 Buscando ofertas activas en: {url}")
+        print(f"🔎 Escaneando lista: {url}")
         try:
-            page.goto(url, timeout=45000)
-            page.wait_for_timeout(2000)
+            page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            page.wait_for_timeout(500)
 
             try:
                 btn_cookies = page.locator("#sp-cc-accept")
-                if btn_cookies.is_visible(timeout=2000):
-                    btn_cookies.click()
+                if btn_cookies.is_visible(timeout=700):
+                    btn_cookies.click(timeout=1000)
+                    page.wait_for_timeout(250)
             except Exception:
                 pass
 
-            enlaces = page.locator("a[href*='/dp/']").all()
-            asins_vistos = []
-            for a in enlaces:
-                href = a.get_attribute("href") or ""
-                m = re.search(r"/dp/([A-Z0-9]{10})", href)
-                if m:
-                    asin = m.group(1)
-                    if asin not in historial and asin not in asins_vistos:
-                        asins_vistos.append(asin)
-
-            for asin in asins_vistos[:15]:
-                url_prod = f"https://www.amazon.es/dp/{asin}"
-                page.goto(url_prod, timeout=30000)
-                page.wait_for_timeout(1500)
-
-                if page.locator("#productTitle").count() == 0:
+            enlaces = page.locator("a[href*='/dp/']").evaluate_all(
+                "(els) => els.map(a => a.href)"
+            )
+            añadidos = 0
+            for href in enlaces:
+                m = re.search(r"/dp/([A-Z0-9]{10})", href or "")
+                if not m:
                     continue
-
-                titulo = page.locator("#productTitle").first.inner_text().strip()
-
-                # Extraer imagen original del producto
-                loc_img = page.locator("#landingImage, #imgBlkFront").first
-                img_url = loc_img.get_attribute("src") if loc_img.count() > 0 else None
-
-                descuento = None
-                loc_desc = page.locator(".savingsPercentage").first
-                if loc_desc.count() > 0 and loc_desc.is_visible():
-                    descuento = loc_desc.inner_text().strip()
-
-                precio_actual = None
-                loc_precio = page.locator("#corePriceDisplay_desktop_feature_div .a-price .a-offscreen, .a-price .a-offscreen").first
-                if loc_precio.count() > 0:
-                    precio_actual = limpiar_precio(loc_precio.inner_text())
-
-                precio_antes = None
-                loc_antes = page.locator(".basisPrice .a-offscreen, .a-text-price .a-offscreen").first
-                if loc_antes.count() > 0:
-                    precio_antes = limpiar_precio(loc_antes.inner_text())
-
-                if descuento and precio_actual and precio_antes:
-                    try:
-                        val_act = float(precio_actual.replace(",", "."))
-                        val_ant = float(precio_antes.replace(",", "."))
-                        if val_ant > val_act:
-                            print(f"🎯 ¡Chollo validado! {asin}")
-                            return {
-                                "asin": asin,
-                                "titulo_completo": titulo,
-                                "titulo_corto": titulo[:85] + "..." if len(titulo) > 85 else titulo,
-                                "descuento": descuento,
-                                "precio_actual": precio_actual,
-                                "precio_antes": precio_antes,
-                                "imagen_original": img_url
-                            }
-                    except ValueError:
-                        continue
+                asin = m.group(1)
+                if asin in historial or asin in vistos:
+                    continue
+                vistos.add(asin)
+                candidatos.append(asin)
+                añadidos += 1
+                if añadidos >= 6:
+                    break
         except Exception as e:
-            print(f"⚠️ Aviso rastreando {url}: {e}")
+            print(f"⚠️ Aviso escaneando {url}: {e}")
+
+    if not candidatos:
+        raise RuntimeError("No hay productos nuevos en las listas rastreadas.")
+
+    # Límite deliberado para que el workflow no tarde varios minutos revisando
+    # decenas de fichas por cada categoría.
+    max_productos = 18
+    ofertas = []
+
+    for indice, asin in enumerate(candidatos[:max_productos], start=1):
+        url_prod = f"https://www.amazon.es/dp/{asin}"
+        try:
+            print(f"🔬 Revisando producto {indice}/{min(len(candidatos), max_productos)}: {asin}")
+            page.goto(url_prod, wait_until="domcontentloaded", timeout=25000)
+            page.wait_for_timeout(350)
+
+            loc_titulo = page.locator("#productTitle")
+            if loc_titulo.count() == 0:
+                continue
+            titulo = loc_titulo.first.inner_text(timeout=2500).strip()
+
+            loc_img = page.locator("#landingImage, #imgBlkFront").first
+            img_url = loc_img.get_attribute("src", timeout=2000) if loc_img.count() else None
+
+            descuento_texto = None
+            loc_desc = page.locator(".savingsPercentage").first
+            if loc_desc.count():
+                try:
+                    descuento_texto = loc_desc.inner_text(timeout=1500).strip()
+                except Exception:
+                    pass
+            descuento_num = porcentaje_descuento(descuento_texto)
+
+            loc_precio = page.locator(
+                "#corePriceDisplay_desktop_feature_div .a-price .a-offscreen, "
+                "#apex_desktop .a-price .a-offscreen, .a-price .a-offscreen"
+            ).first
+            precio_actual = limpiar_precio(loc_precio.inner_text(timeout=2000)) if loc_precio.count() else None
+
+            loc_antes = page.locator(
+                ".basisPrice .a-offscreen, .a-text-price .a-offscreen, "
+                "#corePriceDisplay_desktop_feature_div .a-text-price .a-offscreen"
+            ).first
+            precio_antes = limpiar_precio(loc_antes.inner_text(timeout=2000)) if loc_antes.count() else None
+
+            if not precio_actual or not precio_antes:
+                continue
+
+            val_act = float(precio_actual.replace(",", "."))
+            val_ant = float(precio_antes.replace(",", "."))
+            if val_act <= 0 or val_ant <= val_act:
+                continue
+
+            # Calculamos el descuento también desde los precios por si Amazon
+            # no expone el porcentaje en el selector habitual.
+            descuento_calculado = round((1 - val_act / val_ant) * 100)
+            descuento_num = max(descuento_num or 0, descuento_calculado)
+            if descuento_num < 25:
+                print(f"⏭️ Descartado: {descuento_num}% (mínimo exigido: 25%).")
+                continue
+
+            descuento = f"-{descuento_num}%"
+            # Priorización: descuentos extremos primero, luego el resto.
+            # >=50 % es una señal de posible precio erróneo, no una confirmación.
+            prioridad_error = 1 if descuento_num >= 50 else 0
+            ofertas.append({
+                "asin": asin,
+                "titulo_completo": titulo,
+                "titulo_corto": titulo[:85] + "..." if len(titulo) > 85 else titulo,
+                "descuento": descuento,
+                "descuento_num": descuento_num,
+                "precio_actual": precio_actual,
+                "precio_antes": precio_antes,
+                "imagen_original": img_url,
+                "prioridad_error": prioridad_error,
+            })
+            print(f"✅ Candidato válido: {descuento} | {precio_actual} € (antes {precio_antes} €)")
+
+        except Exception as e:
+            print(f"⚠️ No se pudo revisar {asin}: {e}")
             continue
 
-    raise RuntimeError("No se encontró ningún chollo con descuento válido en este pase.")
+    if not ofertas:
+        raise RuntimeError("No se encontró ningún producto nuevo con descuento real de al menos el 25 %.")
+
+    ofertas.sort(key=lambda x: (x["prioridad_error"], x["descuento_num"]), reverse=True)
+    mejor = ofertas[0]
+    mejor.pop("descuento_num", None)
+    mejor.pop("prioridad_error", None)
+    print(f"🎯 Mejor candidato seleccionado: {mejor['asin']} | {mejor['descuento']}")
+    return mejor
 
 def cargar_fuente(tamano: int, negrita: bool = False):
     rutas = [
@@ -239,6 +314,10 @@ def ejecutar_bot():
             locale="es-ES",
         )
         page = context.new_page()
+        # Reduce carga y tiempos sin tocar el flujo de publicación en X.
+        page.route("**/*", lambda route: route.abort()
+                   if route.request.resource_type in ("font", "media")
+                   else route.continue_())
         try:
             chollo = buscar_chollo_real_amazon(page)
             asin = chollo["asin"]
