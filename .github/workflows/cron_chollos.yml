@@ -25,7 +25,7 @@ concurrency:
 jobs:
   publicar-chollo:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 30
 
     steps:
       - name: 1. Descargar código del repositorio
@@ -62,10 +62,16 @@ jobs:
           X_STATE: ${{ secrets.X_STATE }}
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          # Criterios de oferta (se pueden ajustar sin tocar el código).
+          MIN_DESCUENTO: '25'          # % mínimo para publicar
+          UMBRAL_ERROR_PRECIO: '60'    # desde este % se etiqueta como "posible error de precio"
+          MAX_DESCUENTO: '95'          # por encima se descarta por probable fallo de lectura
         run: python auto_chollovolt.py
 
-      - name: 7. Subir captura si hay error
-        if: failure()
+      # always(): también se sube cuando el bot termina en verde pero X falló
+      # (en ese caso el script guarda error.png y devuelve éxito parcial).
+      - name: 7. Subir captura si existe
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: error-captura
@@ -80,15 +86,30 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          RAMA="${GITHUB_REF_NAME:-main}"
           git config user.name "CholloVolt-Bot"
           git config user.email "bot@users.noreply.github.com"
-          touch historial_estados.json
-          git add historial_estados.json
+
+          # Solo se añade lo que existe: nunca se sube un historial vacío inventado.
+          if [ -f historial_estados.json ]; then
+            git add historial_estados.json
+          fi
           if [ -f historial_publicados.txt ]; then
             git add historial_publicados.txt
           fi
-          if ! git diff --cached --quiet; then
-            git commit -m "Actualizar historial de publicaciones"
+
+          if git diff --cached --quiet; then
+            echo "Sin cambios en el historial."
+            exit 0
           fi
-          git pull --rebase origin "${GITHUB_REF_NAME:-main}"
-          git push origin "HEAD:${GITHUB_REF_NAME:-main}"
+
+          git commit -m "Actualizar historial de publicaciones"
+
+          for intento in 1 2 3; do
+            git pull --rebase --autostash origin "$RAMA" && git push origin "HEAD:$RAMA" && exit 0
+            echo "Intento $intento fallido; reintentando..."
+            git rebase --abort 2>/dev/null || true
+            sleep 5
+          done
+          echo "::error::No se pudo subir el historial tras 3 intentos."
+          exit 1
