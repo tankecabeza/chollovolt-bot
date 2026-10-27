@@ -77,6 +77,10 @@ def buscar_chollo_real_amazon(page):
 
                 titulo = page.locator("#productTitle").first.inner_text().strip()
 
+                # Extraer imagen original del producto
+                loc_img = page.locator("#landingImage, #imgBlkFront").first
+                img_url = loc_img.get_attribute("src") if loc_img.count() > 0 else None
+
                 descuento = None
                 loc_desc = page.locator(".savingsPercentage").first
                 if loc_desc.count() > 0 and loc_desc.is_visible():
@@ -97,13 +101,15 @@ def buscar_chollo_real_amazon(page):
                         val_act = float(precio_actual.replace(",", "."))
                         val_ant = float(precio_antes.replace(",", "."))
                         if val_ant > val_act:
-                            print(f"🎯 ¡Chollo validado! {asin} | {descuento} | {precio_actual}€ (Antes: {precio_antes}€)")
+                            print(f"🎯 ¡Chollo validado! {asin}")
                             return {
                                 "asin": asin,
-                                "titulo": titulo[:85] + "..." if len(titulo) > 85 else titulo,
+                                "titulo_completo": titulo,
+                                "titulo_corto": titulo[:85] + "..." if len(titulo) > 85 else titulo,
                                 "descuento": descuento,
                                 "precio_actual": precio_actual,
                                 "precio_antes": precio_antes,
+                                "imagen_original": img_url
                             }
                     except ValueError:
                         continue
@@ -166,28 +172,41 @@ def crear_imagen_chollo(descuento, precio_actual, precio_antes, ruta_salida):
 # ==============================================================================
 # PUBLICACIÓN EN TELEGRAM
 # ==============================================================================
-def publicar_en_telegram(ruta_imagen: str, texto_mensaje: str) -> bool:
+def publicar_en_telegram(imagen_url: str, imagen_local: str, texto_mensaje: str) -> bool:
     bot_token = os.getenv("TELEGRAM_TOKEN", "")
     chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
 
     if not bot_token or not chat_id:
-        print("⚠️ Faltan los secrets TELEGRAM_TOKEN o TELEGRAM_CHAT_ID. Se omite Telegram.")
+        print("⚠️ Faltan los secrets de Telegram.")
         return False
 
     url = f"https://api.telegram.org/bot{bot_token}/sendPhoto"
     
     try:
         print("📲 Enviando chollo a Telegram...")
-        with open(ruta_imagen, "rb") as foto:
+        
+        # 1º Intento: Mandar la URL de la imagen real de Amazon directamente a Telegram
+        if imagen_url:
             respuesta = requests.post(
                 url, 
-                data={"chat_id": chat_id, "caption": texto_mensaje},
+                data={"chat_id": chat_id, "photo": imagen_url, "caption": texto_mensaje, "parse_mode": "HTML"},
+                timeout=15
+            )
+            if respuesta.status_code == 200:
+                print("✅ ¡Chollo publicado en Telegram con la imagen original!")
+                return True
+
+        # 2º Intento (Fallback): Si falla la original, mandamos la generada (chollo.jpg)
+        print("⚠️ Falló la imagen original, enviando la generada...")
+        with open(imagen_local, "rb") as foto:
+            respuesta = requests.post(
+                url, 
+                data={"chat_id": chat_id, "caption": texto_mensaje, "parse_mode": "HTML"},
                 files={"photo": foto},
                 timeout=15
             )
             
         if respuesta.status_code == 200:
-            print("✅ ¡Chollo publicado en Telegram con éxito!")
             return True
         else:
             print(f"❌ Error de la API de Telegram: {respuesta.text}")
@@ -224,22 +243,35 @@ def ejecutar_bot():
             chollo = buscar_chollo_real_amazon(page)
             asin = chollo["asin"]
             enlace = generar_enlace_afiliado(asin)
-            texto_tuit = (
+            
+            # --- DISEÑO PARA X (Clickbait visual y corto) ---
+            texto_x = (
                 f"🔥 {chollo['descuento']} de descuento 🔥\n"
-                f"📦 {chollo['titulo']}\n"
+                f"📦 {chollo['titulo_corto']}\n"
                 f"💰 Ahora: {chollo['precio_actual']}€ (Antes: {chollo['precio_antes']}€)\n"
                 f"🛒 {enlace}\n\n"
                 f"#chollos #amazon #ofertas"
+            )
+
+            # --- DISEÑO PARA TELEGRAM (Limpio, completo y con formato HTML) ---
+            # Limpiamos caracteres HTML que podrían romper la API de Telegram
+            titulo_limpio = chollo['titulo_completo'].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            texto_telegram = (
+                f"⚡ <b>¡NUEVO CHOLLO DETECTADO!</b> ⚡\n\n"
+                f"📦 <b>Producto:</b> {titulo_limpio}\n\n"
+                f"📉 <b>Descuento:</b> {chollo['descuento']}\n"
+                f"💰 <b>Precio:</b> {chollo['precio_actual']}€ (PVP: <s>{chollo['precio_antes']}€</s>)\n\n"
+                f"🛒 <b>Comprar aquí:</b> {enlace}"
             )
 
             ruta_img = crear_imagen_chollo(
                 chollo["descuento"], chollo["precio_actual"], chollo["precio_antes"], "chollo.jpg"
             )
             
-            # 1. Enviar a Telegram
-            publicar_en_telegram(ruta_img, texto_tuit)
+            # 1. Enviar a Telegram (con imagen real y texto largo)
+            publicar_en_telegram(chollo["imagen_original"], ruta_img, texto_telegram)
 
-            # 2. Enviar a X
+            # 2. Enviar a X (con imagen generada y texto corto)
             print("🌐 Abriendo X con la sesión guardada...")
             page.goto("https://x.com/compose/post", timeout=60000)
 
@@ -259,21 +291,20 @@ def ejecutar_bot():
             editor = page.locator("[data-testid='tweetTextarea_0']").first
             editor.wait_for(timeout=30000)
             editor.click(force=True)
-            page.keyboard.insert_text(texto_tuit)
+            page.keyboard.insert_text(texto_x)
 
-            print("🖼️ Adjuntando imagen...")
+            print("🖼️ Adjuntando imagen generada...")
             page.locator("input[data-testid='fileInput']").first.set_input_files(ruta_img)
             page.locator("[data-testid='attachments']").wait_for(timeout=30000)
             page.wait_for_timeout(4000)
 
-            print("🚀 Publicando...")
+            print("🚀 Publicando en X...")
             boton = page.locator("[data-testid='tweetButton'], [data-testid='tweetButtonInline']").first
             boton.wait_for(timeout=15000)
 
             try:
                 boton.click(timeout=6000)
             except Exception:
-                print("⚠️ Clic normal bloqueado por una capa; lanzando el clic directo...")
                 boton.dispatch_event("click")
                 page.wait_for_timeout(1500)
                 if editor.is_visible():
@@ -287,16 +318,11 @@ def ejecutar_bot():
 
         except Exception as e:
             print(f"❌ Error en el proceso: {e}")
-            try:
-                page.screenshot(path="error.png", full_page=True)
-                print("📸 Captura guardada en error.png")
-            except Exception:
-                pass
             return False
         finally:
             browser.close()
 
 if __name__ == "__main__":
-    print("⚡ Iniciando CholloVolt con rastreador en vivo y doble publicación...")
+    print("⚡ Iniciando CholloVolt (Dual Mode: X + Telegram)...")
     if not ejecutar_bot():
         sys.exit(1)
