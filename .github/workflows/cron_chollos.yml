@@ -2,22 +2,23 @@ name: Bot Automatico CholloVolt
 
 on:
   schedule:
-    # Horario "humano" salpicado y caótico (horas UTC)
-    - cron: '15 8 * * *'   # 08:15
-    - cron: '42 9 * * *'   # 09:42 (1h 27m después)
-    - cron: '05 11 * * *'  # 11:05 (1h 23m después)
-    - cron: '30 12 * * *'  # 12:30 (1h 25m después)
-    - cron: '18 14 * * *'  # 14:18 (1h 48m después)
-    - cron: '55 15 * * *'  # 15:55 (1h 37m después)
-    - cron: '22 17 * * *'  # 17:22 (1h 27m después)
-    - cron: '45 18 * * *'  # 18:45 (1h 23m después)
-    - cron: '10 20 * * *'  # 20:10 (1h 25m después)
-    - cron: '37 21 * * *'  # 21:37 (1h 27m después)
+    # Horario "humano" salpicado (horas UTC; en España invierno suma 1 hora)
+    - cron: '15 8 * * *'
+    - cron: '42 9 * * *'
+    - cron: '05 11 * * *'
+    - cron: '30 12 * * *'
+    - cron: '18 14 * * *'
+    - cron: '55 15 * * *'
+    - cron: '22 17 * * *'
+    - cron: '45 18 * * *'
+    - cron: '10 20 * * *'
+    - cron: '37 21 * * *'
   workflow_dispatch:
 
 permissions:
   contents: write
 
+# Evita que dos ejecuciones (manual y programada) se pisen
 concurrency:
   group: publicar-chollo
   cancel-in-progress: false
@@ -25,6 +26,7 @@ concurrency:
 jobs:
   publicar-chollo:
     runs-on: ubuntu-latest
+    timeout-minutes: 45   # corta ejecuciones atascadas
 
     steps:
       - name: 1. Descargar código del repositorio
@@ -34,6 +36,13 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          cache: 'pip'
+
+      - name: 2b. Caché del navegador Playwright
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-chromium
 
       - name: 3. Instalar librerías y navegador Playwright
         run: |
@@ -41,11 +50,11 @@ jobs:
           pip install -r requirements.txt
           playwright install --with-deps chromium
 
-      - name: 3b. Espera aleatoria anti-spam (Solo en modo automático)
+      - name: 3b. Espera aleatoria (solo en modo automático)
         if: github.event_name == 'schedule'
         run: |
           TIEMPO=$((RANDOM % 1500))
-          echo "⏳ Modo automático detectado. Aplicando jitter: Esperando $TIEMPO segundos..."
+          echo "⏳ Esperando $TIEMPO segundos..."
           sleep $TIEMPO
 
       - name: 4. Ejecutar el bot y publicar en X y Telegram
@@ -64,7 +73,10 @@ jobs:
           path: error.png
           if-no-files-found: ignore
 
+      # always(): guarda el historial aunque X falle, para no repetir
+      # un producto que ya salió en Telegram
       - name: 5. Guardar el ASIN publicado en el historial
+        if: always()
         run: |
           git config --global user.name "CholloVolt-Bot"
           git config --global user.email "bot@chollovolt.local"
