@@ -141,7 +141,22 @@ def publicar_en_web_x(ruta_imagen: str, texto_tuit: str) -> bool:
             print("🚀 Publicando...")
             boton = page.locator("[data-testid='tweetButton']").first
             boton.wait_for(timeout=15000)
-            boton.click()
+
+            # Cerrar banner de cookies si está tapando el botón
+            for texto in ["Aceptar todas las cookies", "Accept all cookies",
+                          "Rechazar cookies no esenciales", "Refuse non-essential cookies"]:
+                try:
+                    page.get_by_role("button", name=texto).click(timeout=2000)
+                    page.wait_for_timeout(1000)
+                    break
+                except Exception:
+                    pass
+
+            try:
+                boton.click(timeout=8000)
+            except Exception:
+                print("⚠️ Clic normal bloqueado por una capa; lanzando el clic directo...")
+                boton.dispatch_event("click")
             # Tras publicar, desaparece el cuadro de redacción
             editor.wait_for(state="detached", timeout=30000)
 
