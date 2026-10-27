@@ -2,7 +2,7 @@ name: Bot Automatico CholloVolt
 
 on:
   schedule:
-    # Horario "humano" salpicado (horas UTC; en España invierno suma 1 hora)
+    # Horas UTC. En España peninsular: UTC+1 en invierno y UTC+2 en verano.
     - cron: '15 8 * * *'
     - cron: '42 9 * * *'
     - cron: '05 11 * * *'
@@ -18,7 +18,6 @@ on:
 permissions:
   contents: write
 
-# Evita que dos ejecuciones (manual y programada) se pisen
 concurrency:
   group: publicar-chollo
   cancel-in-progress: false
@@ -26,7 +25,7 @@ concurrency:
 jobs:
   publicar-chollo:
     runs-on: ubuntu-latest
-    timeout-minutes: 45   # corta ejecuciones atascadas
+    timeout-minutes: 45
 
     steps:
       - name: 1. Descargar código del repositorio
@@ -36,28 +35,28 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-          cache: 'pip'
+          cache: pip
 
-      - name: 2b. Caché del navegador Playwright
+      - name: 3. Restaurar caché de Chromium de Playwright
         uses: actions/cache@v4
         with:
           path: ~/.cache/ms-playwright
-          key: playwright-${{ runner.os }}-chromium
+          key: playwright-${{ runner.os }}-chromium-${{ hashFiles('requirements.txt') }}-v1
 
-      - name: 3. Instalar librerías y navegador Playwright
+      - name: 4. Instalar dependencias y Chromium
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           playwright install --with-deps chromium
 
-      - name: 3b. Espera aleatoria (solo en modo automático)
+      - name: 5. Espera aleatoria (solo ejecuciones programadas)
         if: github.event_name == 'schedule'
         run: |
-          TIEMPO=$((RANDOM % 1500))
-          echo "⏳ Esperando $TIEMPO segundos..."
-          sleep $TIEMPO
+          TIEMPO=$((RANDOM % 300))
+          echo "Esperando aleatoriamente $TIEMPO segundos (máximo 5 minutos)."
+          sleep "$TIEMPO"
 
-      - name: 4. Ejecutar el bot y publicar en X y Telegram
+      - name: 6. Ejecutar el bot
         env:
           AMAZON_TAG: ${{ secrets.AMAZON_TAG }}
           X_STATE: ${{ secrets.X_STATE }}
@@ -65,22 +64,31 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python auto_chollovolt.py
 
-      - name: 4b. Subir captura si ha fallado
+      - name: 7. Subir captura si hay error
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: error-captura
           path: error.png
           if-no-files-found: ignore
+          retention-days: 7
 
-      # always(): guarda el historial aunque X falle, para no repetir
-      # un producto que ya salió en Telegram
-      - name: 5. Guardar el ASIN publicado en el historial
+      # El estado por plataforma es el historial principal. Se conserva también
+      # historial_publicados.txt por compatibilidad con las ejecuciones antiguas.
+      - name: 8. Guardar historial y subir cambios
         if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          git config --global user.name "CholloVolt-Bot"
-          git config --global user.email "bot@chollovolt.local"
-          git add historial_publicados.txt
-          git diff --staged --quiet || git commit -m "Añadido nuevo chollo publicado al historial"
-          git pull --rebase origin main
-          git push
+          git config user.name "CholloVolt-Bot"
+          git config user.email "bot@users.noreply.github.com"
+          touch historial_estados.json
+          git add historial_estados.json
+          if [ -f historial_publicados.txt ]; then
+            git add historial_publicados.txt
+          fi
+          if ! git diff --cached --quiet; then
+            git commit -m "Actualizar historial de publicaciones"
+          fi
+          git pull --rebase origin "${GITHUB_REF_NAME:-main}"
+          git push origin "HEAD:${GITHUB_REF_NAME:-main}"
