@@ -2,17 +2,17 @@ name: Bot Automatico CholloVolt
 
 on:
   schedule:
-    # Horario "humano" salpicado y caótico (horas UTC)
-    - cron: '15 8 * * *'   # 08:15
-    - cron: '42 9 * * *'   # 09:42 (1h 27m después)
-    - cron: '05 11 * * *'  # 11:05 (1h 23m después)
-    - cron: '30 12 * * *'  # 12:30 (1h 25m después)
-    - cron: '18 14 * * *'  # 14:18 (1h 48m después)
-    - cron: '55 15 * * *'  # 15:55 (1h 37m después)
-    - cron: '22 17 * * *'  # 17:22 (1h 27m después)
-    - cron: '45 18 * * *'  # 18:45 (1h 23m después)
-    - cron: '10 20 * * *'  # 20:10 (1h 25m después)
-    - cron: '37 21 * * *'  # 21:37 (1h 27m después)
+    # Horarios UTC; GitHub puede iniciar cron con cierto retraso.
+    - cron: '15 8 * * *'
+    - cron: '42 9 * * *'
+    - cron: '05 11 * * *'
+    - cron: '30 12 * * *'
+    - cron: '18 14 * * *'
+    - cron: '55 15 * * *'
+    - cron: '22 17 * * *'
+    - cron: '45 18 * * *'
+    - cron: '10 20 * * *'
+    - cron: '37 21 * * *'
   workflow_dispatch:
 
 permissions:
@@ -25,38 +25,53 @@ concurrency:
 jobs:
   publicar-chollo:
     runs-on: ubuntu-latest
+    timeout-minutes: 8
 
     steps:
-      - name: 1. Descargar código del repositorio
+      - name: 1. Descargar código
         uses: actions/checkout@v4
+        with:
+          ref: main
 
       - name: 2. Instalar Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          cache: pip
+          cache-dependency-path: requirements.txt
 
-      - name: 3. Instalar librerías y navegador Playwright
+      - name: 3. Restaurar caché de Chromium
+        id: playwright-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('requirements.txt') }}
+
+      - name: 4. Instalar dependencias Python
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          playwright install --with-deps chromium
 
-      - name: 3b. Espera aleatoria anti-spam (Solo en modo automático)
+      - name: 5. Instalar Chromium si no está en caché
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        run: playwright install chromium
+
+      - name: 6. Espera aleatoria corta (solo automático)
         if: github.event_name == 'schedule'
         run: |
-          TIEMPO=$((RANDOM % 1500))
-          echo "⏳ Modo automático detectado. Aplicando jitter: Esperando $TIEMPO segundos..."
-          sleep $TIEMPO
+          TIEMPO=$((RANDOM % 181))
+          echo "Espera aleatoria: ${TIEMPO} segundos."
+          sleep "$TIEMPO"
 
-      - name: 4. Ejecutar el bot y publicar en X y Telegram
+      - name: 7. Ejecutar el bot y publicar en X y Telegram
         env:
           AMAZON_TAG: ${{ secrets.AMAZON_TAG }}
           X_STATE: ${{ secrets.X_STATE }}
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python auto_chollovolt.py
+        run: python -u auto_chollovolt.py
 
-      - name: 4b. Subir captura si ha fallado
+      - name: 8. Subir captura si falla
         if: failure()
         uses: actions/upload-artifact@v4
         with:
@@ -64,11 +79,14 @@ jobs:
           path: error.png
           if-no-files-found: ignore
 
-      - name: 5. Guardar el ASIN publicado en el historial
+      - name: 9. Guardar historial de publicaciones
+        if: success()
         run: |
-          git config --global user.name "CholloVolt-Bot"
-          git config --global user.email "bot@chollovolt.local"
+          git config user.name "CholloVolt-Bot"
+          git config user.email "bot@chollovolt.local"
           git add historial_publicados.txt
-          git diff --staged --quiet || git commit -m "Añadido nuevo chollo publicado al historial"
+          if ! git diff --cached --quiet; then
+            git commit -m "Actualizar historial de publicaciones"
+          fi
           git pull --rebase origin main
           git push
