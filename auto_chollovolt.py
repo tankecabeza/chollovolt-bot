@@ -2,6 +2,7 @@ import os
 import sys
 import json
 import re
+import requests
 from PIL import Image, ImageDraw, ImageFont
 from playwright.sync_api import sync_playwright
 
@@ -13,7 +14,6 @@ X_STATE = os.getenv("X_STATE", "")
 
 ARCHIVO_HISTORIAL = "historial_publicados.txt"
 
-# Categorías de Amazon España para rastrear ofertas reales en vivo
 URLS_RASTREO = [
     "https://www.amazon.es/gp/movers-and-shakers/electronics",
     "https://www.amazon.es/gp/bestsellers/electronics",
@@ -22,22 +22,18 @@ URLS_RASTREO = [
     "https://www.amazon.es/gp/bestsellers/videogames",
 ]
 
-
 def cargar_historial():
     if not os.path.exists(ARCHIVO_HISTORIAL):
         return set()
     with open(ARCHIVO_HISTORIAL, "r", encoding="utf-8") as f:
         return set(line.strip() for line in f if line.strip())
 
-
 def guardar_en_historial(asin: str):
     with open(ARCHIVO_HISTORIAL, "a", encoding="utf-8") as f:
         f.write(f"{asin}\n")
 
-
 def generar_enlace_afiliado(asin: str):
     return f"https://www.amazon.es/dp/{asin}?tag={AMAZON_TAG}"
-
 
 def limpiar_precio(texto: str):
     if not texto:
@@ -45,9 +41,7 @@ def limpiar_precio(texto: str):
     m = re.search(r"(\d+[.,]\d{2})", texto)
     return m.group(1).replace(".", ",") if m else None
 
-
 def buscar_chollo_real_amazon(page):
-    """Rastrea Amazon.es buscando un producto con descuento real y validación de precios."""
     historial = cargar_historial()
 
     for url in URLS_RASTREO:
@@ -98,7 +92,6 @@ def buscar_chollo_real_amazon(page):
                 if loc_antes.count() > 0:
                     precio_antes = limpiar_precio(loc_antes.inner_text())
 
-                # Validación lógica: el precio anterior debe ser mayor al actual
                 if descuento and precio_actual and precio_antes:
                     try:
                         val_act = float(precio_actual.replace(",", "."))
@@ -120,7 +113,6 @@ def buscar_chollo_real_amazon(page):
 
     raise RuntimeError("No se encontró ningún chollo con descuento válido en este pase.")
 
-
 def cargar_fuente(tamano: int, negrita: bool = False):
     rutas = [
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if negrita else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
@@ -133,7 +125,6 @@ def cargar_fuente(tamano: int, negrita: bool = False):
             except Exception:
                 pass
     return ImageFont.load_default()
-
 
 def crear_imagen_chollo(descuento, precio_actual, precio_antes, ruta_salida):
     W, H = 800, 440
@@ -172,10 +163,46 @@ def crear_imagen_chollo(descuento, precio_actual, precio_antes, ruta_salida):
     img.save(ruta_salida, quality=95)
     return ruta_salida
 
+# ==============================================================================
+# PUBLICACIÓN EN TELEGRAM
+# ==============================================================================
+def publicar_en_telegram(ruta_imagen: str, texto_mensaje: str) -> bool:
+    bot_token = os.getenv("TELEGRAM_TOKEN", "")
+    chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
 
+    if not bot_token or not chat_id:
+        print("⚠️ Faltan los secrets TELEGRAM_TOKEN o TELEGRAM_CHAT_ID. Se omite Telegram.")
+        return False
+
+    url = f"https://api.telegram.org/bot{bot_token}/sendPhoto"
+    
+    try:
+        print("📲 Enviando chollo a Telegram...")
+        with open(ruta_imagen, "rb") as foto:
+            respuesta = requests.post(
+                url, 
+                data={"chat_id": chat_id, "caption": texto_mensaje},
+                files={"photo": foto},
+                timeout=15
+            )
+            
+        if respuesta.status_code == 200:
+            print("✅ ¡Chollo publicado en Telegram con éxito!")
+            return True
+        else:
+            print(f"❌ Error de la API de Telegram: {respuesta.text}")
+            return False
+            
+    except Exception as e:
+        print(f"❌ Error crítico conectando con Telegram: {e}")
+        return False
+
+# ==============================================================================
+# EJECUCIÓN PRINCIPAL
+# ==============================================================================
 def ejecutar_bot():
     if not X_STATE:
-        print("❌ Falta el secret X_STATE (contenido de x_state.json).")
+        print("❌ Falta el secret X_STATE.")
         return False
 
     try:
@@ -202,18 +229,22 @@ def ejecutar_bot():
                 f"📦 {chollo['titulo']}\n"
                 f"💰 Ahora: {chollo['precio_actual']}€ (Antes: {chollo['precio_antes']}€)\n"
                 f"🛒 {enlace}\n\n"
-                f"#chollos #amazon #ofertas #chollo"
+                f"#chollos #amazon #ofertas"
             )
 
             ruta_img = crear_imagen_chollo(
                 chollo["descuento"], chollo["precio_actual"], chollo["precio_antes"], "chollo.jpg"
             )
+            
+            # 1. Enviar a Telegram
+            publicar_en_telegram(ruta_img, texto_tuit)
 
+            # 2. Enviar a X
             print("🌐 Abriendo X con la sesión guardada...")
             page.goto("https://x.com/compose/post", timeout=60000)
 
             if "login" in page.url or "i/flow" in page.url:
-                raise RuntimeError("La sesión ha caducado o X pide verificación. Genera x_state.json de nuevo.")
+                raise RuntimeError("La sesión ha caducado o X pide verificación.")
 
             for texto in ["Aceptar todas las cookies", "Accept all cookies",
                           "Rechazar cookies no esenciales", "Refuse non-essential cookies"]:
@@ -249,7 +280,6 @@ def ejecutar_bot():
                     editor.focus()
                     page.keyboard.press("Control+Enter")
 
-            # Pausa segura para dar tiempo a que X procese la publicación sin bloquearse
             page.wait_for_timeout(6000)
             print("✅ Tuit publicado con éxito.")
             guardar_en_historial(asin)
@@ -266,8 +296,7 @@ def ejecutar_bot():
         finally:
             browser.close()
 
-
 if __name__ == "__main__":
-    print("⚡ Iniciando CholloVolt con rastreador en vivo...")
+    print("⚡ Iniciando CholloVolt con rastreador en vivo y doble publicación...")
     if not ejecutar_bot():
         sys.exit(1)
