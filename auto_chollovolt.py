@@ -658,11 +658,18 @@ def ejecutar_bot():
             if telegram_resuelto and x_resuelto:
                 print("✅ El ASIN se ha publicado en todos los destinos configurados.")
                 return True
-            if final["telegram_ok"] or final["x_ok"]:
-                print("⚠️ Publicación parcial: se conservará el estado y se reintentará el canal pendiente.")
-                return True
 
-            print("⚠️ No se confirmó ninguna publicación. El producto queda pendiente para reintento.")
+            # X es un destino obligatorio: Telegram no debe hacer que la ejecución
+            # figure como correcta si la publicación en X sigue pendiente.
+            if x_disponible and not final["x_ok"]:
+                print("::error::X NO confirmó la publicación. Se conserva el ASIN pendiente y se marca la ejecución como fallida para que quede visible y pueda reintentarse en la siguiente ejecución.")
+                return False
+
+            if final["telegram_ok"] or final["x_ok"]:
+                print("⚠️ Publicación parcial: se conserva el estado del canal pendiente.")
+                return False
+
+            print("::error::No se confirmó ninguna publicación. El producto queda pendiente para reintento.")
             return False
 
         except SinChollo as exc:
