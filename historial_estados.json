@@ -5,6 +5,12 @@
     "ultima_comprobacion_utc": "2026-10-27T16:35:54Z",
     "x_ok": false
   },
+  "B00LTT208Q": {
+    "telegram_fecha_utc": "2026-10-27T16:49:26Z",
+    "telegram_ok": true,
+    "ultima_comprobacion_utc": "2026-10-27T16:50:04Z",
+    "x_ok": false
+  },
   "B00O1O70N6": {
     "legacy": true,
     "telegram_ok": true,
