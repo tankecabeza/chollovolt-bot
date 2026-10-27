@@ -22,24 +22,29 @@ URLS_RASTREO = [
     "https://www.amazon.es/gp/bestsellers/videogames",
 ]
 
+
 def cargar_historial():
     if not os.path.exists(ARCHIVO_HISTORIAL):
         return set()
     with open(ARCHIVO_HISTORIAL, "r", encoding="utf-8") as f:
         return set(line.strip() for line in f if line.strip())
 
+
 def guardar_en_historial(asin: str):
     with open(ARCHIVO_HISTORIAL, "a", encoding="utf-8") as f:
         f.write(f"{asin}\n")
 
+
 def generar_enlace_afiliado(asin: str):
     return f"https://www.amazon.es/dp/{asin}?tag={AMAZON_TAG}"
+
 
 def limpiar_precio(texto: str):
     if not texto:
         return None
     m = re.search(r"(\d+[.,]\d{2})", texto)
     return m.group(1).replace(".", ",") if m else None
+
 
 def buscar_chollo_real_amazon(page):
     historial = cargar_historial()
@@ -77,7 +82,6 @@ def buscar_chollo_real_amazon(page):
 
                 titulo = page.locator("#productTitle").first.inner_text().strip()
 
-                # Extraer imagen original del producto
                 loc_img = page.locator("#landingImage, #imgBlkFront").first
                 img_url = loc_img.get_attribute("src") if loc_img.count() > 0 else None
 
@@ -87,7 +91,9 @@ def buscar_chollo_real_amazon(page):
                     descuento = loc_desc.inner_text().strip()
 
                 precio_actual = None
-                loc_precio = page.locator("#corePriceDisplay_desktop_feature_div .a-price .a-offscreen, .a-price .a-offscreen").first
+                loc_precio = page.locator(
+                    "#corePriceDisplay_desktop_feature_div .a-price .a-offscreen, .a-price .a-offscreen"
+                ).first
                 if loc_precio.count() > 0:
                     precio_actual = limpiar_precio(loc_precio.inner_text())
 
@@ -109,7 +115,7 @@ def buscar_chollo_real_amazon(page):
                                 "descuento": descuento,
                                 "precio_actual": precio_actual,
                                 "precio_antes": precio_antes,
-                                "imagen_original": img_url
+                                "imagen_original": img_url,
                             }
                     except ValueError:
                         continue
@@ -118,6 +124,7 @@ def buscar_chollo_real_amazon(page):
             continue
 
     raise RuntimeError("No se encontró ningún chollo con descuento válido en este pase.")
+
 
 def cargar_fuente(tamano: int, negrita: bool = False):
     rutas = [
@@ -131,6 +138,7 @@ def cargar_fuente(tamano: int, negrita: bool = False):
             except Exception:
                 pass
     return ImageFont.load_default()
+
 
 def crear_imagen_chollo(descuento, precio_actual, precio_antes, ruta_salida):
     W, H = 800, 440
@@ -169,6 +177,7 @@ def crear_imagen_chollo(descuento, precio_actual, precio_antes, ruta_salida):
     img.save(ruta_salida, quality=95)
     return ruta_salida
 
+
 # ==============================================================================
 # PUBLICACIÓN EN TELEGRAM
 # ==============================================================================
@@ -177,44 +186,45 @@ def publicar_en_telegram(imagen_url: str, imagen_local: str, texto_mensaje: str)
     chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
 
     if not bot_token or not chat_id:
-        print("⚠️ Faltan los secrets de Telegram.")
+        print("::warning::Faltan los secrets de Telegram (TELEGRAM_TOKEN / TELEGRAM_CHAT_ID).")
         return False
 
     url = f"https://api.telegram.org/bot{bot_token}/sendPhoto"
-    
+
     try:
         print("📲 Enviando chollo a Telegram...")
-        
-        # 1º Intento: Mandar la URL de la imagen real de Amazon directamente a Telegram
-        if imagen_url:
-            respuesta = requests.post(
-                url, 
-                data={"chat_id": chat_id, "photo": imagen_url, "caption": texto_mensaje, "parse_mode": "HTML"},
-                timeout=15
-            )
-            if respuesta.status_code == 200:
-                print("✅ ¡Chollo publicado en Telegram con la imagen original!")
-                return True
 
-        # 2º Intento (Fallback): Si falla la original, mandamos la generada (chollo.jpg)
-        print("⚠️ Falló la imagen original, enviando la generada...")
+        # 1º intento: la imagen real del producto (por URL)
+        if imagen_url:
+            r = requests.post(
+                url,
+                data={"chat_id": chat_id, "photo": imagen_url, "caption": texto_mensaje, "parse_mode": "HTML"},
+                timeout=20,
+            )
+            if r.status_code == 200:
+                print("✅ Publicado en Telegram con la imagen original.")
+                return True
+            print(f"⚠️ Imagen original rechazada ({r.status_code}); usando la generada...")
+
+        # 2º intento: la imagen generada
         with open(imagen_local, "rb") as foto:
-            respuesta = requests.post(
-                url, 
+            r = requests.post(
+                url,
                 data={"chat_id": chat_id, "caption": texto_mensaje, "parse_mode": "HTML"},
                 files={"photo": foto},
-                timeout=15
+                timeout=20,
             )
-            
-        if respuesta.status_code == 200:
+        if r.status_code == 200:
+            print("✅ Publicado en Telegram con la imagen generada.")
             return True
-        else:
-            print(f"❌ Error de la API de Telegram: {respuesta.text}")
-            return False
-            
-    except Exception as e:
-        print(f"❌ Error crítico conectando con Telegram: {e}")
+
+        print(f"::warning::Error de la API de Telegram: {r.text}")
         return False
+
+    except Exception as e:
+        print(f"::warning::Error conectando con Telegram: {e}")
+        return False
+
 
 # ==============================================================================
 # EJECUCIÓN PRINCIPAL
@@ -243,8 +253,8 @@ def ejecutar_bot():
             chollo = buscar_chollo_real_amazon(page)
             asin = chollo["asin"]
             enlace = generar_enlace_afiliado(asin)
-            
-            # --- DISEÑO PARA X (Clickbait visual y corto) ---
+
+            # --- Texto para X (corto) ---
             texto_x = (
                 f"🔥 {chollo['descuento']} de descuento 🔥\n"
                 f"📦 {chollo['titulo_corto']}\n"
@@ -253,9 +263,9 @@ def ejecutar_bot():
                 f"#chollos #amazon #ofertas"
             )
 
-            # --- DISEÑO PARA TELEGRAM (Limpio, completo y con formato HTML) ---
-            # Limpiamos caracteres HTML que podrían romper la API de Telegram
-            titulo_limpio = chollo['titulo_completo'].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            # --- Texto para Telegram (HTML). Límite de pie de foto: 1024 caracteres ---
+            titulo_tg = chollo["titulo_completo"][:200]
+            titulo_limpio = titulo_tg.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
             texto_telegram = (
                 f"⚡ <b>¡NUEVO CHOLLO DETECTADO!</b> ⚡\n\n"
                 f"📦 <b>Producto:</b> {titulo_limpio}\n\n"
@@ -267,16 +277,19 @@ def ejecutar_bot():
             ruta_img = crear_imagen_chollo(
                 chollo["descuento"], chollo["precio_actual"], chollo["precio_antes"], "chollo.jpg"
             )
-            
-            # 1. Enviar a Telegram (con imagen real y texto largo)
-            publicar_en_telegram(chollo["imagen_original"], ruta_img, texto_telegram)
 
-            # 2. Enviar a X (con imagen generada y texto corto)
+            # 1. Telegram. Si sale bien, guardamos el ASIN YA para no repetirlo
+            #    aunque luego falle X.
+            tg_ok = publicar_en_telegram(chollo["imagen_original"], ruta_img, texto_telegram)
+            if tg_ok:
+                guardar_en_historial(asin)
+
+            # 2. X
             print("🌐 Abriendo X con la sesión guardada...")
             page.goto("https://x.com/compose/post", timeout=60000)
 
             if "login" in page.url or "i/flow" in page.url:
-                raise RuntimeError("La sesión ha caducado o X pide verificación.")
+                raise RuntimeError("La sesión de X ha caducado o pide verificación. Genera x_state.json de nuevo.")
 
             for texto in ["Aceptar todas las cookies", "Accept all cookies",
                           "Rechazar cookies no esenciales", "Refuse non-essential cookies"]:
@@ -305,6 +318,7 @@ def ejecutar_bot():
             try:
                 boton.click(timeout=6000)
             except Exception:
+                print("⚠️ Clic normal bloqueado; lanzando clic directo...")
                 boton.dispatch_event("click")
                 page.wait_for_timeout(1500)
                 if editor.is_visible():
@@ -313,16 +327,23 @@ def ejecutar_bot():
 
             page.wait_for_timeout(6000)
             print("✅ Tuit publicado con éxito.")
-            guardar_en_historial(asin)
+            if not tg_ok:
+                guardar_en_historial(asin)
             return True
 
         except Exception as e:
             print(f"❌ Error en el proceso: {e}")
+            try:
+                page.screenshot(path="error.png", full_page=True)
+                print("📸 Captura guardada en error.png")
+            except Exception:
+                pass
             return False
         finally:
             browser.close()
 
+
 if __name__ == "__main__":
-    print("⚡ Iniciando CholloVolt (Dual Mode: X + Telegram)...")
+    print("⚡ Iniciando CholloVolt (X + Telegram)...")
     if not ejecutar_bot():
         sys.exit(1)
