@@ -21,6 +21,12 @@
     "telegram_ok": true,
     "x_ok": true
   },
+  "B077QQ6WF3": {
+    "telegram_fecha_utc": "2026-10-27T16:59:10Z",
+    "telegram_ok": true,
+    "ultima_comprobacion_utc": "2026-10-27T16:59:47Z",
+    "x_ok": false
+  },
   "B08H99BPJN": {
     "legacy": true,
     "telegram_ok": true,
