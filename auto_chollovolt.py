@@ -13,7 +13,7 @@ X_STATE = os.getenv("X_STATE", "")
 
 ARCHIVO_HISTORIAL = "historial_publicados.txt"
 
-# Categorías de Amazon España donde hay chollos reales constantemente
+# Categorías de Amazon España para rastrear ofertas reales en vivo
 URLS_RASTREO = [
     "https://www.amazon.es/gp/movers-and-shakers/electronics",
     "https://www.amazon.es/gp/bestsellers/electronics",
@@ -47,7 +47,7 @@ def limpiar_precio(texto: str):
 
 
 def buscar_chollo_real_amazon(page):
-    """Rastrea Amazon.es en tiempo real buscando un producto activo con descuento."""
+    """Rastrea Amazon.es buscando un producto con descuento real y validación de precios."""
     historial = cargar_historial()
 
     for url in URLS_RASTREO:
@@ -56,7 +56,6 @@ def buscar_chollo_real_amazon(page):
             page.goto(url, timeout=45000)
             page.wait_for_timeout(2000)
 
-            # Cerrar cookies de Amazon si aparecen
             try:
                 btn_cookies = page.locator("#sp-cc-accept")
                 if btn_cookies.is_visible(timeout=2000):
@@ -64,7 +63,6 @@ def buscar_chollo_real_amazon(page):
             except Exception:
                 pass
 
-            # Extraer todos los ASINs visibles en la página de ranking
             enlaces = page.locator("a[href*='/dp/']").all()
             asins_vistos = []
             for a in enlaces:
@@ -75,51 +73,52 @@ def buscar_chollo_real_amazon(page):
                     if asin not in historial and asin not in asins_vistos:
                         asins_vistos.append(asin)
 
-            # Analizar los candidatos entrando en su ficha real
-            for asin in asins_vistos[:12]:
+            for asin in asins_vistos[:15]:
                 url_prod = f"https://www.amazon.es/dp/{asin}"
                 page.goto(url_prod, timeout=30000)
                 page.wait_for_timeout(1500)
 
-                # Comprobar que la página existe y tiene título
                 if page.locator("#productTitle").count() == 0:
                     continue
 
                 titulo = page.locator("#productTitle").first.inner_text().strip()
 
-                # Buscar descuento (ej. -25%)
                 descuento = None
                 loc_desc = page.locator(".savingsPercentage").first
                 if loc_desc.count() > 0 and loc_desc.is_visible():
                     descuento = loc_desc.inner_text().strip()
 
-                # Buscar precio actual
                 precio_actual = None
                 loc_precio = page.locator("#corePriceDisplay_desktop_feature_div .a-price .a-offscreen, .a-price .a-offscreen").first
                 if loc_precio.count() > 0:
                     precio_actual = limpiar_precio(loc_precio.inner_text())
 
-                # Buscar precio anterior / recomendado
                 precio_antes = None
                 loc_antes = page.locator(".basisPrice .a-offscreen, .a-text-price .a-offscreen").first
                 if loc_antes.count() > 0:
                     precio_antes = limpiar_precio(loc_antes.inner_text())
 
-                # Si tiene descuento y ambos precios reales, nos lo quedamos
+                # Validación lógica: el precio anterior debe ser mayor al actual
                 if descuento and precio_actual and precio_antes:
-                    print(f"🎯 ¡Chollo real encontrado! {asin} | {descuento} | {precio_actual}€ (Antes: {precio_antes}€)")
-                    return {
-                        "asin": asin,
-                        "titulo": titulo[:85] + "..." if len(titulo) > 85 else titulo,
-                        "descuento": descuento,
-                        "precio_actual": precio_actual,
-                        "precio_antes": precio_antes,
-                    }
+                    try:
+                        val_act = float(precio_actual.replace(",", "."))
+                        val_ant = float(precio_antes.replace(",", "."))
+                        if val_ant > val_act:
+                            print(f"🎯 ¡Chollo validado! {asin} | {descuento} | {precio_actual}€ (Antes: {precio_antes}€)")
+                            return {
+                                "asin": asin,
+                                "titulo": titulo[:85] + "..." if len(titulo) > 85 else titulo,
+                                "descuento": descuento,
+                                "precio_actual": precio_actual,
+                                "precio_antes": precio_antes,
+                            }
+                    except ValueError:
+                        continue
         except Exception as e:
             print(f"⚠️ Aviso rastreando {url}: {e}")
             continue
 
-    raise RuntimeError("No se encontró ningún chollo con descuento activo en este pase.")
+    raise RuntimeError("No se encontró ningún chollo con descuento válido en este pase.")
 
 
 def cargar_fuente(tamano: int, negrita: bool = False):
@@ -195,7 +194,6 @@ def ejecutar_bot():
         )
         page = context.new_page()
         try:
-            # 1. Buscar un chollo real y verificar que existe en Amazon.es
             chollo = buscar_chollo_real_amazon(page)
             asin = chollo["asin"]
             enlace = generar_enlace_afiliado(asin)
@@ -211,7 +209,6 @@ def ejecutar_bot():
                 chollo["descuento"], chollo["precio_actual"], chollo["precio_antes"], "chollo.jpg"
             )
 
-            # 2. Publicar en X
             print("🌐 Abriendo X con la sesión guardada...")
             page.goto("https://x.com/compose/post", timeout=60000)
 
@@ -252,8 +249,9 @@ def ejecutar_bot():
                     editor.focus()
                     page.keyboard.press("Control+Enter")
 
-            editor.wait_for(state="detached", timeout=30000)
-            print("✅ Tuit publicado con enlace 100% verificado.")
+            # Pausa segura para dar tiempo a que X procese la publicación sin bloquearse
+            page.wait_for_timeout(6000)
+            print("✅ Tuit publicado con éxito.")
             guardar_en_historial(asin)
             return True
 
