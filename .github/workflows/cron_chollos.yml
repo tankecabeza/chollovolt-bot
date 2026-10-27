@@ -2,17 +2,17 @@ name: Bot Automatico CholloVolt
 
 on:
   schedule:
-    # Horas UTC. En España peninsular: UTC+1 en invierno y UTC+2 en verano.
-    - cron: '15 8 * * *'
-    - cron: '42 9 * * *'
-    - cron: '05 11 * * *'
-    - cron: '30 12 * * *'
-    - cron: '18 14 * * *'
-    - cron: '55 15 * * *'
-    - cron: '22 17 * * *'
-    - cron: '45 18 * * *'
-    - cron: '10 20 * * *'
-    - cron: '37 21 * * *'
+    # Horario "humano" salpicado y caótico (horas UTC)
+    - cron: '15 8 * * *'   # 08:15
+    - cron: '42 9 * * *'   # 09:42 (1h 27m después)
+    - cron: '05 11 * * *'  # 11:05 (1h 23m después)
+    - cron: '30 12 * * *'  # 12:30 (1h 25m después)
+    - cron: '18 14 * * *'  # 14:18 (1h 48m después)
+    - cron: '55 15 * * *'  # 15:55 (1h 37m después)
+    - cron: '22 17 * * *'  # 17:22 (1h 27m después)
+    - cron: '45 18 * * *'  # 18:45 (1h 23m después)
+    - cron: '10 20 * * *'  # 20:10 (1h 25m después)
+    - cron: '37 21 * * *'  # 21:37 (1h 27m después)
   workflow_dispatch:
 
 permissions:
@@ -25,7 +25,6 @@ concurrency:
 jobs:
   publicar-chollo:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
 
     steps:
       - name: 1. Descargar código del repositorio
@@ -35,81 +34,41 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-          cache: pip
 
-      - name: 3. Restaurar caché de Chromium de Playwright
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/ms-playwright
-          key: playwright-${{ runner.os }}-chromium-${{ hashFiles('requirements.txt') }}-v1
-
-      - name: 4. Instalar dependencias y Chromium
+      - name: 3. Instalar librerías y navegador Playwright
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           playwright install --with-deps chromium
 
-      - name: 5. Espera aleatoria (solo ejecuciones programadas)
+      - name: 3b. Espera aleatoria anti-spam (Solo en modo automático)
         if: github.event_name == 'schedule'
         run: |
-          TIEMPO=$((RANDOM % 300))
-          echo "Esperando aleatoriamente $TIEMPO segundos (máximo 5 minutos)."
-          sleep "$TIEMPO"
+          TIEMPO=$((RANDOM % 1500))
+          echo "⏳ Modo automático detectado. Aplicando jitter: Esperando $TIEMPO segundos..."
+          sleep $TIEMPO
 
-      - name: 6. Ejecutar el bot
+      - name: 4. Ejecutar el bot y publicar en X y Telegram
         env:
           AMAZON_TAG: ${{ secrets.AMAZON_TAG }}
           X_STATE: ${{ secrets.X_STATE }}
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          # Criterios de oferta (se pueden ajustar sin tocar el código).
-          MIN_DESCUENTO: '25'          # % mínimo para publicar
-          UMBRAL_ERROR_PRECIO: '60'    # desde este % se etiqueta como "posible error de precio"
-          MAX_DESCUENTO: '95'          # por encima se descarta por probable fallo de lectura
         run: python auto_chollovolt.py
 
-      # always(): también se sube cuando el bot termina en verde pero X falló
-      # (en ese caso el script guarda error.png y devuelve éxito parcial).
-      - name: 7. Subir captura si existe
-        if: always()
+      - name: 4b. Subir captura si ha fallado
+        if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: error-captura
           path: error.png
           if-no-files-found: ignore
-          retention-days: 7
 
-      # El estado por plataforma es el historial principal. Se conserva también
-      # historial_publicados.txt por compatibilidad con las ejecuciones antiguas.
-      - name: 8. Guardar historial y subir cambios
-        if: always()
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: 5. Guardar el ASIN publicado en el historial
         run: |
-          RAMA="${GITHUB_REF_NAME:-main}"
-          git config user.name "CholloVolt-Bot"
-          git config user.email "bot@users.noreply.github.com"
-
-          # Solo se añade lo que existe: nunca se sube un historial vacío inventado.
-          if [ -f historial_estados.json ]; then
-            git add historial_estados.json
-          fi
-          if [ -f historial_publicados.txt ]; then
-            git add historial_publicados.txt
-          fi
-
-          if git diff --cached --quiet; then
-            echo "Sin cambios en el historial."
-            exit 0
-          fi
-
-          git commit -m "Actualizar historial de publicaciones"
-
-          for intento in 1 2 3; do
-            git pull --rebase --autostash origin "$RAMA" && git push origin "HEAD:$RAMA" && exit 0
-            echo "Intento $intento fallido; reintentando..."
-            git rebase --abort 2>/dev/null || true
-            sleep 5
-          done
-          echo "::error::No se pudo subir el historial tras 3 intentos."
-          exit 1
+          git config --global user.name "CholloVolt-Bot"
+          git config --global user.email "bot@chollovolt.local"
+          git add historial_publicados.txt
+          git diff --staged --quiet || git commit -m "Añadido nuevo chollo publicado al historial"
+          git pull --rebase origin main
+          git push
