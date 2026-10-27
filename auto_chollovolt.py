@@ -2,6 +2,7 @@ import os
 import sys
 import json
 import re
+import random
 import requests
 from PIL import Image, ImageDraw, ImageFont
 from playwright.sync_api import sync_playwright
@@ -14,7 +15,12 @@ X_STATE = os.getenv("X_STATE", "")
 
 ARCHIVO_HISTORIAL = "historial_publicados.txt"
 
+class SinChollo(Exception):
+    """No se ha encontrado ningún chollo válido en este pase (no es un fallo grave)."""
+
+
 URLS_RASTREO = [
+    "https://www.amazon.es/gp/goldbox",
     "https://www.amazon.es/gp/movers-and-shakers/electronics",
     "https://www.amazon.es/gp/bestsellers/electronics",
     "https://www.amazon.es/gp/bestsellers/kitchen",
@@ -49,11 +55,27 @@ def limpiar_precio(texto: str):
 def buscar_chollo_real_amazon(page):
     historial = cargar_historial()
 
-    for url in URLS_RASTREO:
+    urls = URLS_RASTREO[:]
+    random.shuffle(urls)
+
+    for url in urls:
         print(f"🔎 Buscando ofertas activas en: {url}")
         try:
             page.goto(url, timeout=45000)
-            page.wait_for_timeout(2000)
+            page.wait_for_timeout(2500)
+
+            # Diagnóstico: ¿nos ha bloqueado Amazon?
+            titulo_pag = page.title()
+            html_bajo = page.content().lower()
+            print(f"   📄 Título de la página: {titulo_pag!r}")
+            if ("captcha" in html_bajo or "introduce los caracteres" in html_bajo
+                    or "robot" in titulo_pag.lower()):
+                print("   🤖 Amazon está pidiendo captcha a esta IP; paso a la siguiente categoría.")
+                continue
+
+            # Desplazarse un poco para que carguen los productos
+            page.mouse.wheel(0, 3000)
+            page.wait_for_timeout(1500)
 
             try:
                 btn_cookies = page.locator("#sp-cc-accept")
@@ -71,6 +93,8 @@ def buscar_chollo_real_amazon(page):
                     asin = m.group(1)
                     if asin not in historial and asin not in asins_vistos:
                         asins_vistos.append(asin)
+
+            print(f"   → {len(asins_vistos)} productos nuevos encontrados en la página")
 
             for asin in asins_vistos[:15]:
                 url_prod = f"https://www.amazon.es/dp/{asin}"
@@ -123,7 +147,7 @@ def buscar_chollo_real_amazon(page):
             print(f"⚠️ Aviso rastreando {url}: {e}")
             continue
 
-    raise RuntimeError("No se encontró ningún chollo con descuento válido en este pase.")
+    raise SinChollo("No se encontró ningún chollo con descuento válido en este pase.")
 
 
 def cargar_fuente(tamano: int, negrita: bool = False):
@@ -329,6 +353,15 @@ def ejecutar_bot():
             print("✅ Tuit publicado con éxito.")
             if not tg_ok:
                 guardar_en_historial(asin)
+            return True
+
+        except SinChollo as e:
+            # No es un fallo del bot: simplemente no había ofertas válidas ahora.
+            print(f"::warning::{e} Nada publicado; se reintentará en la siguiente ejecución.")
+            try:
+                page.screenshot(path="error.png", full_page=True)
+            except Exception:
+                pass
             return True
 
         except Exception as e:
