@@ -44,5 +44,29 @@
     "legacy": true,
     "telegram_ok": true,
     "x_ok": true
+  },
+  "B0H6GD47Y5": {
+    "creado_utc": "2026-10-27T16:42:26Z",
+    "telegram_fecha_utc": "2026-10-27T16:42:26Z",
+    "telegram_ok": true,
+    "ultima_comprobacion_utc": "2026-10-27T16:42:48Z",
+    "x_ok": false
+  },
+  "_descartados": {
+    "B07H37NQNQ": "2026-10-27T16:41:40Z",
+    "B07JH6VD7T": "2026-10-27T16:41:01Z",
+    "B081KJ9R3T": "2026-10-27T16:40:53Z",
+    "B09FDQXPC7": "2026-10-27T16:42:09Z",
+    "B0C4DX7RMX": "2026-10-27T16:42:13Z",
+    "B0D6NLHV8N": "2026-10-27T16:41:35Z",
+    "B0F2NCQYTX": "2026-10-27T16:41:31Z",
+    "B0GFX9VJLQ": "2026-10-27T16:41:13Z",
+    "B0GZH9BJYD": "2026-10-27T16:41:22Z",
+    "B0H4RM453L": "2026-10-27T16:41:09Z",
+    "B0H7KH6117": "2026-10-27T16:41:05Z",
+    "B0H9XV6183": "2026-10-27T16:42:22Z",
+    "B0HJ91G9GH": "2026-10-27T16:41:18Z",
+    "B0HK28LQ2D": "2026-10-27T16:41:26Z",
+    "B0HLG5GQVW": "2026-10-27T16:41:56Z"
   }
 }
