@@ -1,0 +1,48 @@
+{
+  "B00AQXH3FQ": {
+    "telegram_fecha_utc": "2026-10-27T16:35:31Z",
+    "telegram_ok": true,
+    "ultima_comprobacion_utc": "2026-10-27T16:35:54Z",
+    "x_ok": false
+  },
+  "B00O1O70N6": {
+    "legacy": true,
+    "telegram_ok": true,
+    "x_ok": true
+  },
+  "B075JHQX38": {
+    "legacy": true,
+    "telegram_ok": true,
+    "x_ok": true
+  },
+  "B08H99BPJN": {
+    "legacy": true,
+    "telegram_ok": true,
+    "x_ok": true
+  },
+  "B095CLQ1PT": {
+    "legacy": true,
+    "telegram_ok": true,
+    "x_ok": true
+  },
+  "B09B8W5V33": {
+    "legacy": true,
+    "telegram_ok": true,
+    "x_ok": true
+  },
+  "B0F457MQCQ": {
+    "legacy": true,
+    "telegram_ok": true,
+    "x_ok": true
+  },
+  "B0FNRNF57H": {
+    "legacy": true,
+    "telegram_ok": true,
+    "x_ok": true
+  },
+  "B0H4GYHGZQ": {
+    "legacy": true,
+    "telegram_ok": true,
+    "x_ok": true
+  }
+}
