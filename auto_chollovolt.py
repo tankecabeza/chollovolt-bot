@@ -117,6 +117,7 @@ def publicar_en_web_x(ruta_imagen: str, texto_tuit: str) -> bool:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(
             storage_state=estado,
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
             viewport={"width": 1280, "height": 800},
             locale="es-ES",
         )
@@ -128,21 +129,7 @@ def publicar_en_web_x(ruta_imagen: str, texto_tuit: str) -> bool:
             if "login" in page.url or "i/flow" in page.url:
                 raise RuntimeError("La sesión ha caducado o X pide verificación. Genera x_state.json de nuevo.")
 
-            print("✍️ Escribiendo tuit...")
-            editor = page.locator("[data-testid='tweetTextarea_0']").first
-            editor.wait_for(timeout=30000)
-            editor.click()
-            page.keyboard.insert_text(texto_tuit)
-
-            print("🖼️ Adjuntando imagen...")
-            page.locator("input[data-testid='fileInput']").first.set_input_files(ruta_imagen)
-            page.locator("[data-testid='attachments']").wait_for(timeout=30000)
-
-            print("🚀 Publicando...")
-            boton = page.locator("[data-testid='tweetButton']").first
-            boton.wait_for(timeout=15000)
-
-            # Cerrar banner de cookies si está tapando el botón
+            # Cerrar banner de cookies si está tapando la interfaz
             for texto in ["Aceptar todas las cookies", "Accept all cookies",
                           "Rechazar cookies no esenciales", "Refuse non-essential cookies"]:
                 try:
@@ -152,11 +139,32 @@ def publicar_en_web_x(ruta_imagen: str, texto_tuit: str) -> bool:
                 except Exception:
                     pass
 
+            print("✍️ Escribiendo tuit...")
+            editor = page.locator("[data-testid='tweetTextarea_0']").first
+            editor.wait_for(timeout=30000)
+            editor.click(force=True)
+            page.keyboard.insert_text(texto_tuit)
+
+            print("🖼️ Adjuntando imagen...")
+            page.locator("input[data-testid='fileInput']").first.set_input_files(ruta_imagen)
+            page.locator("[data-testid='attachments']").wait_for(timeout=30000)
+            # Espera necesaria para que X termine de subir la imagen al servidor y active el botón
+            page.wait_for_timeout(4000)
+
+            print("🚀 Publicando...")
+            boton = page.locator("[data-testid='tweetButton'], [data-testid='tweetButtonInline']").first
+            boton.wait_for(timeout=15000)
+
             try:
-                boton.click(timeout=8000)
+                boton.click(timeout=6000)
             except Exception:
                 print("⚠️ Clic normal bloqueado por una capa; lanzando el clic directo...")
                 boton.dispatch_event("click")
+                page.wait_for_timeout(1500)
+                if editor.is_visible():
+                    editor.focus()
+                    page.keyboard.press("Control+Enter")
+
             # Tras publicar, desaparece el cuadro de redacción
             editor.wait_for(state="detached", timeout=30000)
 
