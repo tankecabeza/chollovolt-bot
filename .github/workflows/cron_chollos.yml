@@ -48,8 +48,6 @@ jobs:
           pip install -r requirements.txt
           playwright install --with-deps chromium
 
-      # Antes esperaba hasta 25 min por ejecución (media ~12 min). Ahora máximo 3 min.
-      # Los cron ya están repartidos a horas "irregulares"; si no quieres espera, borra este paso.
       - name: 5. Espera aleatoria corta (solo ejecuciones programadas)
         if: github.event_name == 'schedule'
         run: |
@@ -63,11 +61,11 @@ jobs:
           X_STATE: ${{ secrets.X_STATE }}
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          # Criterios de búsqueda (el script ya lee estas variables)
-          MIN_DESCUENTO: '25'          # % mínimo para publicar
+          # Criterios de búsqueda ajustados para publicar más a menudo
+          MIN_DESCUENTO: '15'          # % mínimo para publicar (bajado al 15%)
           UMBRAL_ERROR_PRECIO: '50'    # desde este % se marca "posible error de precio"
           MAX_DESCUENTO: '95'          # por encima se descarta (probable fallo de lectura)
-          MAX_REVISAR: '40'            # productos a verificar por ejecución
+          MAX_REVISAR: '80'            # subido a 80 productos a verificar por ejecución
           CONCURRENCIA: '4'            # páginas de Amazon abiertas a la vez
         run: python auto_chollovolt.py
 
