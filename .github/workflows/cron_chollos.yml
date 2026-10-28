@@ -55,8 +55,8 @@ jobs:
           MIN_DESCUENTO: '15'
           UMBRAL_ERROR_PRECIO: '50'
           MAX_DESCUENTO: '95'
-          MAX_REVISAR: '80'
-          CONCURRENCIA: '4'
+          MAX_REVISAR: '15'            # Revisar solo los 15 mejores
+          CONCURRENCIA: '1'            # FUNDAMENTAL: De uno en uno para evitar el CAPTCHA
         run: python auto_chollovolt.py
 
       - name: 7. Subir captura si existe
