@@ -2,17 +2,8 @@ name: Bot Automatico CholloVolt
 
 on:
   schedule:
-    # Horario salpicado (horas UTC)
-    - cron: '15 8 * * *'
-    - cron: '42 9 * * *'
-    - cron: '05 11 * * *'
-    - cron: '30 12 * * *'
-    - cron: '18 14 * * *'
-    - cron: '55 15 * * *'
-    - cron: '22 17 * * *'
-    - cron: '45 18 * * *'
-    - cron: '10 20 * * *'
-    - cron: '37 21 * * *'
+    # Ejecuta en el minuto 15 y 45 de cada hora, entre las 07:00 y las 22:00 UTC (08:00 a 23:00 en España)
+    - cron: '15,45 7-22 * * *'
   workflow_dispatch:
 
 permissions:
@@ -31,7 +22,7 @@ jobs:
       - name: 1. Descargar código del repositorio
         uses: actions/checkout@v4
 
-      - name: 2. Instalar Python 3.11 (con caché de pip)
+      - name: 2. Instalar Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -48,25 +39,24 @@ jobs:
           pip install -r requirements.txt
           playwright install --with-deps chromium
 
-      - name: 5. Espera aleatoria corta (solo ejecuciones programadas)
+      - name: 5. Espera aleatoria corta
         if: github.event_name == 'schedule'
         run: |
-          TIEMPO=$((RANDOM % 180))
+          TIEMPO=$((RANDOM % 120))
           echo "⏳ Esperando $TIEMPO segundos..."
           sleep "$TIEMPO"
 
-      - name: 6. Ejecutar el bot y publicar en X y Telegram
+      - name: 6. Ejecutar el bot
         env:
           AMAZON_TAG: ${{ secrets.AMAZON_TAG }}
           X_STATE: ${{ secrets.X_STATE }}
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          # Criterios de búsqueda ajustados para publicar más a menudo
-          MIN_DESCUENTO: '15'          # % mínimo para publicar (bajado al 15%)
-          UMBRAL_ERROR_PRECIO: '50'    # desde este % se marca "posible error de precio"
-          MAX_DESCUENTO: '95'          # por encima se descarta (probable fallo de lectura)
-          MAX_REVISAR: '80'            # subido a 80 productos a verificar por ejecución
-          CONCURRENCIA: '4'            # páginas de Amazon abiertas a la vez
+          MIN_DESCUENTO: '15'          
+          UMBRAL_ERROR_PRECIO: '50'    
+          MAX_DESCUENTO: '95'          
+          MAX_REVISAR: '80'            
+          CONCURRENCIA: '4'            
         run: python auto_chollovolt.py
 
       - name: 7. Subir captura si existe
@@ -78,7 +68,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-      - name: 8. Guardar el ASIN publicado en el historial
+      - name: 8. Guardar historial
         if: always()
         run: |
           git config user.name "CholloVolt-Bot"
