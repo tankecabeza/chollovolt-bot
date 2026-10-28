@@ -27,14 +27,18 @@ X_STATE = os.getenv("X_STATE", "")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
-MIN_DESCUENTO = _env_float("MIN_DESCUENTO", 15)
+MIN_DESCUENTO = _env_float("MIN_DESCUENTO", 25)
 UMBRAL_ERROR_PRECIO = _env_float("UMBRAL_ERROR_PRECIO", 50)
 MAX_DESCUENTO = _env_float("MAX_DESCUENTO", 95)
-MAX_REVISAR = int(_env_float("MAX_REVISAR", 15))
+MAX_REVISAR = int(_env_float("MAX_REVISAR", 12))
 CONCURRENCIA = int(_env_float("CONCURRENCIA", 1))
+MAX_CAPTCHAS_SEGUIDOS = 3
+# Por defecto NO se bloquean imágenes/fuentes: el navegador carga las páginas como uno normal.
+BLOQUEAR_RECURSOS = os.getenv("BLOQUEAR_RECURSOS", "0") == "1"
 
-PISO_ABSOLUTO = 5.0
-ESCALERA = [MIN_DESCUENTO, 10.0, PISO_ABSOLUTO]
+# Mismo mínimo en todos los pasos: no se publica nada por debajo del MIN_DESCUENTO.
+PISO_ABSOLUTO = MIN_DESCUENTO
+ESCALERA = [MIN_DESCUENTO]
 
 ARCHIVO_HISTORIAL = "historial_publicados.txt"
 USER_AGENT = (
@@ -63,12 +67,19 @@ RE_ASIN_HTML = re.compile(r"(?:/dp/|/gp/product/|/gp/aw/d/|asin[\"'=:\s]{1,6})(B
 
 MOTIVOS = Counter()
 
+
 class SinChollo(Exception):
     pass
+
+
+class BloqueoAmazon(Exception):
+    pass
+
 
 def rechazo(motivo):
     MOTIVOS[motivo] += 1
     return None
+
 
 def cargar_historial():
     if not os.path.exists(ARCHIVO_HISTORIAL):
@@ -76,12 +87,15 @@ def cargar_historial():
     with open(ARCHIVO_HISTORIAL, "r", encoding="utf-8") as f:
         return set(line.strip() for line in f if line.strip())
 
+
 def guardar_en_historial(asin):
     with open(ARCHIVO_HISTORIAL, "a", encoding="utf-8") as f:
         f.write(f"{asin}\n")
 
+
 def generar_enlace_afiliado(asin):
     return f"https://www.amazon.es/dp/{asin}?tag={AMAZON_TAG}"
+
 
 def parse_precio(texto):
     if not texto:
@@ -93,8 +107,10 @@ def parse_precio(texto):
     m = re.search(r"\d+\.\d{2}\b", t)
     return float(m.group()) if m else None
 
+
 def fmt_precio(valor):
     return f"{valor:.2f}".replace(".", ",")
+
 
 def intercalar(listas):
     resultado, vistos = [], set()
@@ -105,6 +121,7 @@ def intercalar(listas):
                 resultado.append(asin)
     return resultado
 
+
 async def _filtrar_recursos(route):
     req = route.request
     if req.resource_type in ("image", "media", "font") or any(d in req.url for d in BLOQUEAR_DOMINIOS):
@@ -112,20 +129,56 @@ async def _filtrar_recursos(route):
     else:
         await route.continue_()
 
+
 async def nueva_pagina_amazon(context):
     page = await context.new_page()
-    await page.route("**/*", _filtrar_recursos)
+    if BLOQUEAR_RECURSOS:
+        await page.route("**/*", _filtrar_recursos)
     return page
+
 
 async def hay_captcha(page):
     try:
-        return await page.locator("form[action*='validateCaptcha'], input#captchacharacters").count() > 0
+        if await page.locator("form[action*='validateCaptcha'], input#captchacharacters").count() > 0:
+            return True
+        titulo = (await page.title()).lower()
+        return "robot" in titulo or "captcha" in titulo
     except Exception:
         return False
 
+
+async def calentar_sesion(context):
+    """Abre la portada de Amazon como lo haría una persona, para crear la sesión y las cookies
+    antes de entrar en fichas de producto. Si ya hay CAPTCHA aquí, es un bloqueo de IP."""
+    page = await context.new_page()
+    try:
+        print("🏠 Abriendo la portada de Amazon (calentamiento de sesión)...")
+        await page.goto("https://www.amazon.es/", wait_until="domcontentloaded", timeout=30000)
+        await page.wait_for_timeout(2500)
+        try:
+            if await page.locator("#sp-cc-accept").count():
+                await page.locator("#sp-cc-accept").click(timeout=1500)
+                await page.wait_for_timeout(1000)
+        except Exception:
+            pass
+        if await hay_captcha(page):
+            try:
+                await page.screenshot(path="error.png", full_page=True)
+            except Exception:
+                pass
+            raise BloqueoAmazon(
+                "Amazon muestra CAPTCHA ya en la portada: la IP del servidor está bloqueada ahora mismo."
+            )
+        await page.mouse.wheel(0, 900)
+        await page.wait_for_timeout(1500)
+        print("✅ Sesión de Amazon creada sin CAPTCHA.")
+    finally:
+        await page.close()
+
+
 async def recoger_asins(context, url, sem):
     async with sem:
-        page = await nueva_pagina_amazon(context)
+        page = await context.new_page()
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=30000)
             await page.wait_for_timeout(2500)
@@ -133,7 +186,7 @@ async def recoger_asins(context, url, sem):
             await page.wait_for_timeout(1500)
 
             titulo = await page.title()
-            if await hay_captcha(page):
+            if "amazon" in url and await hay_captcha(page):
                 print(f"🤖 Captcha en {url} (título: {titulo!r})")
                 return []
 
@@ -157,6 +210,7 @@ async def recoger_asins(context, url, sem):
             return []
         finally:
             await page.close()
+
 
 JS_EXTRAER = """() => {
   const centro = document.querySelector('#centerCol') || document.body;
@@ -208,12 +262,11 @@ RE_MINIMO_30D = re.compile(
     re.I | re.S,
 )
 
+
 async def verificar_producto(context, asin, sem):
     async with sem:
-        # PAUSA HUMANA ALEATORIA: Engaña al sistema anti-bots de Amazon
-        espera = random.uniform(2.5, 5.5)
-        await asyncio.sleep(espera)
-        
+        await asyncio.sleep(random.uniform(2.5, 5.5))  # ritmo pausado, como una persona
+
         page = await nueva_pagina_amazon(context)
         try:
             await page.goto(f"https://www.amazon.es/dp/{asin}", wait_until="domcontentloaded", timeout=30000)
@@ -272,21 +325,25 @@ async def verificar_producto(context, asin, sem):
         finally:
             await page.close()
 
+
 def elegir_con_escalera(validos):
     for umbral in ESCALERA:
         cand = [c for c in validos if c["descuento_porcentaje"] >= umbral]
         if cand:
             cand.sort(key=lambda c: (c["posible_error_precio"], c["descuento_porcentaje"]), reverse=True)
-            if umbral != ESCALERA[0]:
-                print(f"ℹ️ Sin chollos ≥ {ESCALERA[0]:.0f}%; usando el listón de {umbral:.0f}%.")
             return cand[0]
     return None
 
-async def buscar_chollo(context, historial):
-    sem = asyncio.Semaphore(CONCURRENCIA)
 
+async def buscar_chollo(context, historial):
+    sem = asyncio.Semaphore(max(1, CONCURRENCIA))
+
+    # 1) Recoger candidatos (SaveMoney: no toca Amazon)
     res_prio = await asyncio.gather(*(recoger_asins(context, u, sem) for u in FUENTES_PRIORITARIAS))
     ordenados = intercalar(res_prio)
+
+    # 2) Crear la sesión de Amazon como una persona antes de mirar fichas
+    await calentar_sesion(context)
 
     if len(ordenados) < 10:
         print(f"ℹ️ Solo {len(ordenados)} ASINs de SaveMoney; añado fuentes de respaldo de Amazon.")
@@ -295,30 +352,27 @@ async def buscar_chollo(context, historial):
         ordenados += [a for a in intercalar(res_sec) if a not in ya]
 
     pendientes = [a for a in ordenados if a not in historial][:MAX_REVISAR]
-    print(f"📦 {len(ordenados)} ASINs recogidos, {len(pendientes)} nuevos (no publicados antes).")
+    print(f"📦 {len(ordenados)} ASINs recogidos, {len(pendientes)} nuevos a revisar.")
 
     if not pendientes:
         raise SinChollo("No hay productos nuevos que revisar.")
 
-    print(f"🧪 Verificando en Amazon {len(pendientes)} productos...")
+    print(f"🧪 Verificando en Amazon {len(pendientes)} productos (de uno en uno)...")
     validos = []
-    
-    # Detener el bot automáticamente si Amazon nos bloquea con 4 CAPTCHAs seguidos
-    captchas_consecutivos = 0
+    captchas_seguidos = 0
 
-    for i in range(0, len(pendientes), CONCURRENCIA):
-        lote = pendientes[i:i + CONCURRENCIA]
+    for i in range(0, len(pendientes), max(1, CONCURRENCIA)):
+        lote = pendientes[i:i + max(1, CONCURRENCIA)]
+        antes = MOTIVOS["captcha_amazon"]
         res = await asyncio.gather(*(verificar_producto(context, a, sem) for a in lote))
-        
-        for r in res:
-            if r is None and MOTIVOS["captcha_amazon"] > captchas_consecutivos:
-                captchas_consecutivos = MOTIVOS["captcha_amazon"]
-            else:
-                captchas_consecutivos = 0
+        nuevos = MOTIVOS["captcha_amazon"] - antes
 
-        if captchas_consecutivos >= 4:
-            print("::warning::Amazon ha puesto CAPTCHA 4 veces seguidas. Abortando revisión para evitar baneo de IP.")
-            break
+        captchas_seguidos = captchas_seguidos + nuevos if nuevos == len(lote) else 0
+        if captchas_seguidos >= MAX_CAPTCHAS_SEGUIDOS:
+            print(f"📊 Motivos de descarte: {dict(MOTIVOS)}")
+            raise BloqueoAmazon(
+                f"Amazon mostró CAPTCHA {captchas_seguidos} veces seguidas en fichas de producto (IP bloqueada)."
+            )
 
         validos += [r for r in res if r]
         buenos = [r for r in validos if r["descuento_porcentaje"] >= ESCALERA[0]]
@@ -329,8 +383,9 @@ async def buscar_chollo(context, historial):
 
     elegido = elegir_con_escalera(validos)
     if not elegido:
-        raise SinChollo(f"Ningún producto revisado tiene un descuento real de al menos {PISO_ABSOLUTO:.0f}%.")
+        raise SinChollo(f"Ningún producto revisado tiene un descuento real de al menos {MIN_DESCUENTO:.0f}%.")
     return elegido
+
 
 def cargar_fuente(tamano, negrita=False):
     rutas = [
@@ -344,6 +399,7 @@ def cargar_fuente(tamano, negrita=False):
             except Exception:
                 pass
     return ImageFont.load_default()
+
 
 def crear_imagen_chollo(descuento, precio_actual, precio_antes, ruta_salida, es_prime=False, posible_error=False):
     W, H = 800, 440
@@ -385,6 +441,7 @@ def crear_imagen_chollo(descuento, precio_actual, precio_antes, ruta_salida, es_
     img.save(ruta_salida, quality=95)
     return ruta_salida
 
+
 def publicar_en_telegram(imagen_url, imagen_local, texto_mensaje):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         print("::warning::Faltan TELEGRAM_TOKEN / TELEGRAM_CHAT_ID.")
@@ -416,10 +473,12 @@ def publicar_en_telegram(imagen_url, imagen_local, texto_mensaje):
         if r.status_code == 200:
             print("✅ Telegram: publicado con la imagen generada.")
             return True
+        print(f"::warning::Telegram respondió {r.status_code}: {r.text[:200]}")
         return False
     except Exception as exc:
         print(f"::warning::Error con Telegram: {exc}")
         return False
+
 
 async def publicar_en_x(context, texto_x, ruta_img):
     page = await context.new_page()
@@ -466,13 +525,22 @@ async def publicar_en_x(context, texto_x, ruta_img):
             print("✅ X: publicado (el compositor se cerró).")
         except Exception:
             print("::warning::X: no pude confirmar que el compositor se cerrara; revisa el perfil.")
+            try:
+                await page.screenshot(path="error.png", full_page=True)
+            except Exception:
+                pass
         return True
 
     except Exception as exc:
         print(f"::warning::Error publicando en X: {exc}")
+        try:
+            await page.screenshot(path="error.png", full_page=True)
+        except Exception:
+            pass
         return False
     finally:
         await page.close()
+
 
 async def ejecutar_bot():
     tg_cfg = bool(TELEGRAM_TOKEN and TELEGRAM_CHAT_ID)
@@ -485,6 +553,7 @@ async def ejecutar_bot():
     x_cfg = estado_x is not None
 
     print(f"⚙️ Canales: Telegram={'sí' if tg_cfg else 'NO'} | X={'sí' if x_cfg else 'NO'}")
+    print(f"⚙️ Mínimo {MIN_DESCUENTO:.0f}% | error de precio desde {UMBRAL_ERROR_PRECIO:.0f}% | revisar {MAX_REVISAR} | concurrencia {CONCURRENCIA}")
     if not tg_cfg and not x_cfg:
         print("::error::No hay ningún canal configurado (faltan los secrets).")
         return False
@@ -507,6 +576,9 @@ async def ejecutar_bot():
             except SinChollo as exc:
                 print(f"::warning::NADA PUBLICADO en este pase: {exc}")
                 return True
+            except BloqueoAmazon as exc:
+                print(f"::error::{exc}")
+                return False
 
             asin = chollo["asin"]
             enlace = generar_enlace_afiliado(asin)
@@ -560,6 +632,7 @@ async def ejecutar_bot():
             return False
         finally:
             await browser.close()
+
 
 if __name__ == "__main__":
     ok = asyncio.run(ejecutar_bot())
