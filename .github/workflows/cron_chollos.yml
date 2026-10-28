@@ -2,8 +2,8 @@ name: Bot Automatico CholloVolt
 
 on:
   schedule:
-    # Ejecuta en el minuto 15 y 45 de cada hora, entre las 07:00 y las 22:00 UTC (08:00 a 23:00 en España)
-    - cron: '15,45 7-22 * * *'
+    # 8 ejecuciones al día (cada 2 horas, entre las 07:15 y las 21:15 UTC)
+    - cron: '15 7-21/2 * * *'
   workflow_dispatch:
 
 permissions:
@@ -52,11 +52,11 @@ jobs:
           X_STATE: ${{ secrets.X_STATE }}
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          MIN_DESCUENTO: '15'          
-          UMBRAL_ERROR_PRECIO: '50'    
-          MAX_DESCUENTO: '95'          
-          MAX_REVISAR: '80'            
-          CONCURRENCIA: '4'            
+          MIN_DESCUENTO: '15'
+          UMBRAL_ERROR_PRECIO: '50'
+          MAX_DESCUENTO: '95'
+          MAX_REVISAR: '80'
+          CONCURRENCIA: '4'
         run: python auto_chollovolt.py
 
       - name: 7. Subir captura si existe
