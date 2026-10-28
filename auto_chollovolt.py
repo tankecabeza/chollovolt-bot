@@ -2,6 +2,7 @@ import asyncio
 import html
 import json
 import os
+import random
 import re
 import sys
 from itertools import zip_longest
@@ -12,7 +13,7 @@ from playwright.async_api import async_playwright
 
 
 # ==============================================================================
-# CONFIGURACIÓN (todo ajustable desde el workflow, sin tocar el código)
+# CONFIGURACIÓN 
 # ==============================================================================
 def _env_float(nombre, defecto):
     try:
@@ -26,11 +27,14 @@ X_STATE = os.getenv("X_STATE", "")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
-MIN_DESCUENTO = _env_float("MIN_DESCUENTO", 25)               # % mínimo para publicar
-UMBRAL_ERROR_PRECIO = _env_float("UMBRAL_ERROR_PRECIO", 50)   # desde aquí: "posible error de precio"
-MAX_DESCUENTO = _env_float("MAX_DESCUENTO", 95)               # por encima: lectura sospechosa, se descarta
-MAX_REVISAR = int(_env_float("MAX_REVISAR", 40))              # productos a verificar como máximo
-CONCURRENCIA = int(_env_float("CONCURRENCIA", 4))             # páginas de Amazon en paralelo
+MIN_DESCUENTO = _env_float("MIN_DESCUENTO", 15)
+UMBRAL_ERROR_PRECIO = _env_float("UMBRAL_ERROR_PRECIO", 50)
+MAX_DESCUENTO = _env_float("MAX_DESCUENTO", 95)
+MAX_REVISAR = int(_env_float("MAX_REVISAR", 80))
+CONCURRENCIA = int(_env_float("CONCURRENCIA", 4))
+
+# ESCALERA KAMIKAZE: Si no encuentra el 15%, baja al 10%, luego al 5% y por último publica lo que sea (0%)
+ESCALERA = [MIN_DESCUENTO, 10.0, 5.0, 0.0]
 
 ARCHIVO_HISTORIAL = "historial_publicados.txt"
 USER_AGENT = (
@@ -38,7 +42,6 @@ USER_AGENT = (
     "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 )
 
-# Fuentes donde suelen aparecer descuentos fuertes y errores de precio
 FUENTES_PRIORITARIAS = [
     "https://www.amazon.es/gp/goldbox",
     "https://www.amazon.es/gp/movers-and-shakers/electronics",
@@ -62,7 +65,7 @@ RE_ASIN = re.compile(r"/(?:dp|gp/product)/([A-Z0-9]{10})")
 
 
 class SinChollo(Exception):
-    """No hay ningún producto publicable en este pase (no es un error técnico)."""
+    pass
 
 
 # ==============================================================================
@@ -73,7 +76,6 @@ def cargar_historial():
         return set()
     with open(ARCHIVO_HISTORIAL, "r", encoding="utf-8") as f:
         return set(line.strip() for line in f if line.strip())
-
 
 def guardar_en_historial(asin):
     with open(ARCHIVO_HISTORIAL, "a", encoding="utf-8") as f:
@@ -86,9 +88,7 @@ def guardar_en_historial(asin):
 def generar_enlace_afiliado(asin):
     return f"https://www.amazon.es/dp/{asin}?tag={AMAZON_TAG}"
 
-
 def parse_precio(texto):
-    """'1.234,56 €' -> 1234.56 ; '12,99 €' -> 12.99"""
     if not texto:
         return None
     t = texto.replace("\xa0", " ")
@@ -98,13 +98,10 @@ def parse_precio(texto):
     m = re.search(r"\d+\.\d{2}\b", t)
     return float(m.group()) if m else None
 
-
 def fmt_precio(valor):
     return f"{valor:.2f}".replace(".", ",")
 
-
 def intercalar(listas):
-    """Mezcla listas en round-robin para no revisar solo una fuente."""
     resultado, vistos = [], set()
     for grupo in zip_longest(*listas):
         for asin in grupo:
@@ -113,7 +110,6 @@ def intercalar(listas):
                 resultado.append(asin)
     return resultado
 
-
 async def _filtrar_recursos(route):
     req = route.request
     if req.resource_type in ("image", "media", "font") or any(d in req.url for d in BLOQUEAR_DOMINIOS):
@@ -121,13 +117,10 @@ async def _filtrar_recursos(route):
     else:
         await route.continue_()
 
-
 async def nueva_pagina_amazon(context):
-    """Página sin imágenes, fuentes ni trackers: carga mucho más rápido."""
     page = await context.new_page()
     await page.route("**/*", _filtrar_recursos)
     return page
-
 
 async def hay_captcha(page):
     try:
@@ -137,7 +130,7 @@ async def hay_captcha(page):
 
 
 # ==============================================================================
-# BÚSQUEDA DE CHOLLOS (en paralelo)
+# BÚSQUEDA DE CHOLLOS
 # ==============================================================================
 async def recoger_asins(context, url, sem):
     async with sem:
@@ -226,6 +219,8 @@ RE_MINIMO_30D = re.compile(
 
 async def verificar_producto(context, asin, sem):
     async with sem:
+        # Micro-pausa humana para evitar los CAPTCHAs que saltan al entrar a Amazon
+        await asyncio.sleep(random.uniform(1.0, 2.5))
         page = await nueva_pagina_amazon(context)
         try:
             await page.goto(f"https://www.amazon.es/dp/{asin}", wait_until="domcontentloaded", timeout=30000)
@@ -238,52 +233,53 @@ async def verificar_producto(context, asin, sem):
 
             d = await page.evaluate(JS_EXTRAER)
             if not d.get("titulo") or not d.get("carrito"):
-                return None  # sin título o sin stock / sin botón de compra
+                return None 
 
             actual = parse_precio(d.get("actual"))
-            antes = parse_precio(d.get("antes"))
-            if not actual or not antes or actual <= 0 or antes <= actual:
+            if not actual or actual <= 0:
                 return None
 
-            pct = round((antes - actual) / antes * 100, 1)
-            if pct < MIN_DESCUENTO:
-                print(f"   ⏭️  {asin}: {pct}% (< {MIN_DESCUENTO:.0f}%)")
-                return None
+            antes = parse_precio(d.get("antes"))
+            
+            # Lógica para permitir publicar TODO
+            if antes and antes > actual:
+                pct = round((antes - actual) / antes * 100, 1)
+                txt_antes = fmt_precio(antes)
+                txt_desc = f"-{int(round(pct))}%"
+            else:
+                pct = 0.0
+                txt_antes = None
+                txt_desc = "TOP"
+
             if pct > MAX_DESCUENTO:
                 print(f"   🗑️  {asin}: {pct}% descartado (lectura sospechosa)")
                 return None
 
-            # La etiqueta de descuento de Amazon debe coincidir con el cálculo
-            m_badge = re.search(r"(\d{1,2})\s*%", d.get("badge") or "")
-            if m_badge and abs(int(m_badge.group(1)) - pct) > 8:
-                print(f"   🗑️  {asin}: etiqueta {m_badge.group(1)}% ≠ cálculo {pct}% (descartado)")
-                return None
-
-            # Si Amazon muestra el precio más bajo de los últimos 30 días y el actual
-            # apenas lo mejora, el "precio anterior" es un PVP inflado: falso descuento.
-            m30 = RE_MINIMO_30D.search(d.get("centro") or "")
-            if m30:
-                minimo_30d = parse_precio(m30.group(1))
-                if minimo_30d and actual >= minimo_30d * 0.92:
-                    print(f"   🗑️  {asin}: {pct}% pero el mínimo de 30 días es {minimo_30d} € (PVP inflado)")
+            if txt_antes:
+                m_badge = re.search(r"(\d{1,2})\s*%", d.get("badge") or "")
+                if m_badge and abs(int(m_badge.group(1)) - pct) > 8:
                     return None
 
+                m30 = RE_MINIMO_30D.search(d.get("centro") or "")
+                if m30:
+                    minimo_30d = parse_precio(m30.group(1))
+                    if minimo_30d and actual >= minimo_30d * 0.92:
+                        return None
+
             flag = pct >= UMBRAL_ERROR_PRECIO
-            print(f"   {'🚨' if flag else '🎯'} {asin}: {pct}% ({fmt_precio(actual)} € vs {fmt_precio(antes)} €)")
-            titulo = d["titulo"]
+            print(f"   {'🚨' if flag else '🎯'} {asin}: {pct}% ({fmt_precio(actual)} €)")
             return {
                 "asin": asin,
-                "titulo_completo": titulo,
-                "descuento": f"-{int(round(pct))}%",
+                "titulo_completo": d["titulo"],
+                "descuento": txt_desc,
                 "descuento_porcentaje": pct,
                 "posible_error_precio": flag,
                 "precio_actual": fmt_precio(actual),
-                "precio_antes": fmt_precio(antes),
+                "precio_antes": txt_antes,
                 "imagen_original": d.get("imagen"),
                 "es_prime": bool(d.get("prime")),
             }
         except Exception as exc:
-            print(f"   ⚠️ {asin}: no se pudo verificar ({exc})")
             return None
         finally:
             await page.close()
@@ -305,19 +301,32 @@ async def buscar_chollo(context, historial):
 
     print(f"🧪 Verificando {len(pendientes)} productos ({CONCURRENCIA} en paralelo)...")
     validos = []
+    
     for i in range(0, len(pendientes), CONCURRENCIA):
         lote = pendientes[i:i + CONCURRENCIA]
         res = await asyncio.gather(*(verificar_producto(context, a, sem) for a in lote))
         validos += [r for r in res if r]
-        if any(r["posible_error_precio"] for r in validos):
-            break  # ya hay un posible error de precio: no hace falta seguir buscando
+        
+        # Parar anticipadamente si encontramos algo por encima de la exigencia inicial
+        buenos = [r for r in validos if r["descuento_porcentaje"] >= ESCALERA[0]]
+        if buenos or any(r["posible_error_precio"] for r in validos):
+            break 
 
     if not validos:
-        raise SinChollo(f"Ningún producto revisado alcanza un {MIN_DESCUENTO:.0f}% de descuento verificado.")
+        raise SinChollo("Ningún producto revisado tiene stock disponible.")
 
-    validos.sort(key=lambda c: (c["posible_error_precio"], c["descuento_porcentaje"]), reverse=True)
-    elegido = validos[0]
-    print(f"🏆 Elegido {elegido['asin']} con {elegido['descuento_porcentaje']}% de descuento calculado.")
+    # APLICAR LA ESCALERA KAMIKAZE
+    elegido = None
+    for umbral in ESCALERA:
+        cand = [c for c in validos if c["descuento_porcentaje"] >= umbral]
+        if cand:
+            cand.sort(key=lambda c: (c["posible_error_precio"], c["descuento_porcentaje"]), reverse=True)
+            if umbral != ESCALERA[0]:
+                print(f"ℹ️ Bajando el listón a {umbral:.0f}% para asegurar publicación.")
+            elegido = cand[0]
+            break
+            
+    print(f"🏆 Elegido {elegido['asin']} para publicar.")
     return elegido
 
 
@@ -361,18 +370,21 @@ def crear_imagen_chollo(descuento, precio_actual, precio_antes, ruta_salida, es_
     bbox_eur = draw.textbbox((x_precio, 50), euros, font=f_gigante)
     draw.text((bbox_eur[2] + 6, 58), f"{centimos} €", font=f_super, fill=(15, 17, 17))
 
-    texto_antes = f"Precio recomendado: {precio_antes}€"
-    draw.text((45, 230), texto_antes, font=f_gris, fill=(86, 89, 89))
-    bbox_sp = draw.textbbox((45, 230), "Precio recomendado: ", font=f_gris)
-    bbox_total = draw.textbbox((45, 230), texto_antes, font=f_gris)
-    y_linea = (bbox_total[1] + bbox_total[3]) // 2 + 2
-    draw.line([(bbox_sp[2], y_linea), (bbox_total[2], y_linea)], fill=(86, 89, 89), width=3)
+    if precio_antes:
+        texto_antes = f"Precio recomendado: {precio_antes}€"
+        draw.text((45, 230), texto_antes, font=f_gris, fill=(86, 89, 89))
+        bbox_sp = draw.textbbox((45, 230), "Precio recomendado: ", font=f_gris)
+        bbox_total = draw.textbbox((45, 230), texto_antes, font=f_gris)
+        y_linea = (bbox_total[1] + bbox_total[3]) // 2 + 2
+        draw.line([(bbox_sp[2], y_linea), (bbox_total[2], y_linea)], fill=(86, 89, 89), width=3)
+    else:
+        draw.text((45, 230), "Oferta destacada en Amazon", font=f_gris, fill=(86, 89, 89))
 
     if es_prime:
         draw.line([(48, 348), (62, 366), (92, 326)], fill=(255, 153, 0), width=9)
         draw.text((98, 315), "prime", font=f_prime, fill=(0, 113, 197))
+    
     if posible_error:
-        # ¡Ajuste aplicado para que no se corte en X!
         draw.text((160, 335), "¡POSIBLE ERROR DE PRECIO!", font=f_alerta, fill=(204, 12, 57))
 
     draw.rectangle([(2, 2), (W - 3, H - 3)], outline=(225, 228, 228), width=3)
@@ -381,7 +393,7 @@ def crear_imagen_chollo(descuento, precio_actual, precio_antes, ruta_salida, es_
 
 
 # ==============================================================================
-# TELEGRAM
+# TELEGRAM Y X
 # ==============================================================================
 def publicar_en_telegram(imagen_url, imagen_local, texto_mensaje):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
@@ -400,10 +412,9 @@ def publicar_en_telegram(imagen_url, imagen_local, texto_mensaje):
                 if r.status_code == 200:
                     print("✅ Telegram: publicado con la imagen original.")
                     return True
-            except requests.RequestException as exc:
-                print(f"⚠️ Telegram (imagen original): {exc}")
+            except requests.RequestException:
+                pass
 
-        print("⚠️ Enviando la imagen generada a Telegram...")
         with open(imagen_local, "rb") as foto:
             r = requests.post(
                 url,
@@ -414,27 +425,18 @@ def publicar_en_telegram(imagen_url, imagen_local, texto_mensaje):
         if r.status_code == 200:
             print("✅ Telegram: publicado con la imagen generada.")
             return True
-        print(f"❌ Error de la API de Telegram: {r.text}")
         return False
-    except Exception as exc:
-        print(f"❌ Error conectando con Telegram: {exc}")
+    except Exception:
         return False
 
 
-# ==============================================================================
-# X
-# ==============================================================================
 async def publicar_en_x(context, texto_x, ruta_img):
     page = await context.new_page()
     try:
-        print("🌐 Abriendo X con la sesión guardada...")
+        print("🌐 Abriendo X...")
         await page.goto("https://x.com/compose/post", timeout=60000)
 
-        if "login" in page.url or "i/flow" in page.url:
-            raise RuntimeError("La sesión de X ha caducado o pide verificación.")
-
-        for texto in ["Aceptar todas las cookies", "Accept all cookies",
-                      "Rechazar cookies no esenciales", "Refuse non-essential cookies"]:
+        for texto in ["Aceptar todas las cookies", "Accept all cookies", "Rechazar cookies no esenciales"]:
             try:
                 await page.get_by_role("button", name=texto).click(timeout=2000)
                 await page.wait_for_timeout(1000)
@@ -442,18 +444,15 @@ async def publicar_en_x(context, texto_x, ruta_img):
             except Exception:
                 pass
 
-        print("✍️ Escribiendo tuit...")
         editor = page.locator("[data-testid='tweetTextarea_0']").first
         await editor.wait_for(timeout=30000)
         await editor.click(force=True)
         await page.keyboard.insert_text(texto_x)
 
-        print("🖼️ Adjuntando imagen...")
         await page.locator("input[data-testid='fileInput']").first.set_input_files(ruta_img)
         await page.locator("[data-testid='attachments']").wait_for(timeout=30000)
         await page.wait_for_timeout(3000)
 
-        print("🚀 Publicando en X...")
         boton = page.locator("[data-testid='tweetButton'], [data-testid='tweetButtonInline']").first
         await boton.wait_for(timeout=15000)
 
@@ -468,21 +467,13 @@ async def publicar_en_x(context, texto_x, ruta_img):
 
         try:
             await editor.wait_for(state="hidden", timeout=8000)
-            print("✅ X: publicado (el compositor se cerró).")
+            print("✅ X: publicado.")
         except Exception:
-            print("::warning::X: no se vio cerrarse el compositor; revisa tu perfil (captura en error.png).")
-            try:
-                await page.screenshot(path="error.png", full_page=True)
-            except Exception:
-                pass
+            pass
         return True
 
     except Exception as exc:
         print(f"::warning::Error publicando en X: {exc}")
-        try:
-            await page.screenshot(path="error.png", full_page=True)
-        except Exception:
-            pass
         return False
     finally:
         await page.close()
@@ -493,17 +484,15 @@ async def publicar_en_x(context, texto_x, ruta_img):
 # ==============================================================================
 async def ejecutar_bot():
     tg_cfg = bool(TELEGRAM_TOKEN and TELEGRAM_CHAT_ID)
-
     estado_x = None
     if X_STATE:
         try:
             estado_x = json.loads(X_STATE)
         except json.JSONDecodeError:
-            print("::warning::X_STATE no es un JSON válido; se omite X.")
+            pass
     x_cfg = estado_x is not None
 
     if not tg_cfg and not x_cfg:
-        print("❌ No hay ninguna plataforma configurada (Telegram / X).")
         return False
 
     historial = cargar_historial()
@@ -522,33 +511,42 @@ async def ejecutar_bot():
                 chollo = await buscar_chollo(context, historial)
             except SinChollo as exc:
                 print(f"ℹ️ {exc}")
-                return True  # no es un fallo: simplemente no había nada publicable
+                return True 
 
             asin = chollo["asin"]
             enlace = generar_enlace_afiliado(asin)
             flag = chollo["posible_error_precio"]
             titulo = chollo["titulo_completo"]
 
-            cab_x = (f"🚨 POSIBLE ERROR DE PRECIO {chollo['descuento']} 🚨" if flag
-                     else f"🔥 {chollo['descuento']} de descuento 🔥")
+            txt_precio_x = f"💰 Ahora: {chollo['precio_actual']}€"
+            txt_precio_tg = f"💰 <b>Precio:</b> {chollo['precio_actual']}€"
+            
+            if chollo["precio_antes"]:
+                txt_precio_x += f" (Antes: {chollo['precio_antes']}€)"
+                txt_precio_tg += f" (PVP: <s>{chollo['precio_antes']}€</s>)"
+
+            if flag:
+                cabecera = f"🚨 POSIBLE ERROR DE PRECIO {chollo['descuento']} 🚨"
+            elif "%" in chollo['descuento']:
+                cabecera = f"🔥 {chollo['descuento']} de descuento 🔥"
+            else:
+                cabecera = "⚡ ¡OFERTA DESTACADA! ⚡"
+
             titulo_x = titulo[:70].rstrip() + ("…" if len(titulo) > 70 else "")
             texto_x = (
-                f"{cab_x}\n"
+                f"{cabecera}\n"
                 f"📦 {titulo_x}\n"
-                f"💰 Ahora: {chollo['precio_actual']}€ (Antes: {chollo['precio_antes']}€)\n"
+                f"{txt_precio_x}\n"
                 f"🛒 {enlace}\n\n"
                 f"#chollos #amazon #ofertas\n"
                 f"(Enlace de afiliado)"
             )
 
-            cab_tg = ("🚨 <b>¡POSIBLE ERROR DE PRECIO!</b> 🚨" if flag
-                      else "⚡ <b>¡NUEVO CHOLLO DETECTADO!</b> ⚡")
             aviso = ("\n⚠️ <i>Puede corregirse o cancelarse en cualquier momento.</i>\n" if flag else "")
             texto_telegram = (
-                f"{cab_tg}\n\n"
+                f"{cabecera}\n\n"
                 f"📦 <b>Producto:</b> {html.escape(titulo[:180])}\n\n"
-                f"📉 <b>Descuento:</b> {html.escape(chollo['descuento'])}\n"
-                f"💰 <b>Precio:</b> {chollo['precio_actual']}€ (PVP: <s>{chollo['precio_antes']}€</s>)\n"
+                f"{txt_precio_tg}\n"
                 f"{aviso}\n"
                 f"🛒 <b>Comprar aquí:</b> {html.escape(enlace)}\n\n"
                 f"<i>Como afiliado de Amazon, obtengo ingresos por las compras adscritas que cumplen los requisitos aplicables.</i>"
@@ -565,12 +563,9 @@ async def ejecutar_bot():
             if x_cfg:
                 resultados["X"] = await publicar_en_x(context, texto_x, ruta_img)
 
-            # Si al menos un canal publicó, se guarda el ASIN para no repetirlo.
             if any(resultados.values()):
                 guardar_en_historial(asin)
 
-            for canal, ok in resultados.items():
-                print(f"{'✅' if ok else '❌'} {canal}: {'publicado' if ok else 'NO publicado'}")
             return all(resultados.values())
         except Exception as exc:
             print(f"❌ Error general del bot: {exc}")
