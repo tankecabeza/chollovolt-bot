@@ -2,6 +2,7 @@ import asyncio
 import html
 import json
 import os
+import random
 import re
 import sys
 import traceback
@@ -29,10 +30,9 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 MIN_DESCUENTO = _env_float("MIN_DESCUENTO", 15)
 UMBRAL_ERROR_PRECIO = _env_float("UMBRAL_ERROR_PRECIO", 50)
 MAX_DESCUENTO = _env_float("MAX_DESCUENTO", 95)
-MAX_REVISAR = int(_env_float("MAX_REVISAR", 80))
-CONCURRENCIA = int(_env_float("CONCURRENCIA", 4))
+MAX_REVISAR = int(_env_float("MAX_REVISAR", 15))
+CONCURRENCIA = int(_env_float("CONCURRENCIA", 1))
 
-# Escalera de descuento
 PISO_ABSOLUTO = 5.0
 ESCALERA = [MIN_DESCUENTO, 10.0, PISO_ABSOLUTO]
 
@@ -158,7 +158,6 @@ async def recoger_asins(context, url, sem):
         finally:
             await page.close()
 
-# ESTE BLOQUE HA SIDO REESCRITO PARA BUSCAR SOLO EN LA COLUMNA CENTRAL (#centerCol)
 JS_EXTRAER = """() => {
   const centro = document.querySelector('#centerCol') || document.body;
   const primero = (sels) => {
@@ -211,6 +210,10 @@ RE_MINIMO_30D = re.compile(
 
 async def verificar_producto(context, asin, sem):
     async with sem:
+        # PAUSA HUMANA ALEATORIA: Engaña al sistema anti-bots de Amazon
+        espera = random.uniform(2.5, 5.5)
+        await asyncio.sleep(espera)
+        
         page = await nueva_pagina_amazon(context)
         try:
             await page.goto(f"https://www.amazon.es/dp/{asin}", wait_until="domcontentloaded", timeout=30000)
@@ -299,9 +302,24 @@ async def buscar_chollo(context, historial):
 
     print(f"🧪 Verificando en Amazon {len(pendientes)} productos...")
     validos = []
+    
+    # Detener el bot automáticamente si Amazon nos bloquea con 4 CAPTCHAs seguidos
+    captchas_consecutivos = 0
+
     for i in range(0, len(pendientes), CONCURRENCIA):
         lote = pendientes[i:i + CONCURRENCIA]
         res = await asyncio.gather(*(verificar_producto(context, a, sem) for a in lote))
+        
+        for r in res:
+            if r is None and MOTIVOS["captcha_amazon"] > captchas_consecutivos:
+                captchas_consecutivos = MOTIVOS["captcha_amazon"]
+            else:
+                captchas_consecutivos = 0
+
+        if captchas_consecutivos >= 4:
+            print("::warning::Amazon ha puesto CAPTCHA 4 veces seguidas. Abortando revisión para evitar baneo de IP.")
+            break
+
         validos += [r for r in res if r]
         buenos = [r for r in validos if r["descuento_porcentaje"] >= ESCALERA[0]]
         if len(buenos) >= 3 or any(r["posible_error_precio"] for r in validos):
