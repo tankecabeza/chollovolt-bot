@@ -32,8 +32,7 @@ MAX_DESCUENTO = _env_float("MAX_DESCUENTO", 95)
 MAX_REVISAR = int(_env_float("MAX_REVISAR", 80))
 CONCURRENCIA = int(_env_float("CONCURRENCIA", 4))
 
-# Escalera de descuento: se intenta MIN_DESCUENTO; si no hay nada, 10 %, y luego 5 %.
-# El descuento sigue siendo REAL y verificado en Amazon; solo se baja el listón.
+# Escalera de descuento
 PISO_ABSOLUTO = 5.0
 ESCALERA = [MIN_DESCUENTO, 10.0, PISO_ABSOLUTO]
 
@@ -50,7 +49,6 @@ FUENTES_PRIORITARIAS = [
     "https://savemoney.es/ofertas/hogar",
     "https://savemoney.es/ofertas/juguetes",
 ]
-# Respaldo: páginas de Amazon (se usan si SaveMoney no da productos suficientes)
 FUENTES_SECUNDARIAS = [
     "https://www.amazon.es/gp/goldbox",
     "https://www.amazon.es/gp/movers-and-shakers/electronics",
@@ -60,21 +58,17 @@ FUENTES_SECUNDARIAS = [
 
 BLOQUEAR_DOMINIOS = ("amazon-adsystem", "fls-eu.amazon", "google-analytics", "doubleclick")
 
-# ASIN en enlaces (permisivo) y en el HTML (con contexto, para evitar basura)
 RE_ASIN = re.compile(r"(B0[A-Z0-9]{8})")
 RE_ASIN_HTML = re.compile(r"(?:/dp/|/gp/product/|/gp/aw/d/|asin[\"'=:\s]{1,6})(B0[A-Z0-9]{8})", re.I)
 
-MOTIVOS = Counter()  # por qué se descarta cada producto (para diagnosticar
-
+MOTIVOS = Counter()
 
 class SinChollo(Exception):
     pass
 
-
 def rechazo(motivo):
     MOTIVOS[motivo] += 1
     return None
-
 
 def cargar_historial():
     if not os.path.exists(ARCHIVO_HISTORIAL):
@@ -82,15 +76,12 @@ def cargar_historial():
     with open(ARCHIVO_HISTORIAL, "r", encoding="utf-8") as f:
         return set(line.strip() for line in f if line.strip())
 
-
 def guardar_en_historial(asin):
     with open(ARCHIVO_HISTORIAL, "a", encoding="utf-8") as f:
         f.write(f"{asin}\n")
 
-
 def generar_enlace_afiliado(asin):
     return f"https://www.amazon.es/dp/{asin}?tag={AMAZON_TAG}"
-
 
 def parse_precio(texto):
     if not texto:
@@ -102,10 +93,8 @@ def parse_precio(texto):
     m = re.search(r"\d+\.\d{2}\b", t)
     return float(m.group()) if m else None
 
-
 def fmt_precio(valor):
     return f"{valor:.2f}".replace(".", ",")
-
 
 def intercalar(listas):
     resultado, vistos = [], set()
@@ -116,7 +105,6 @@ def intercalar(listas):
                 resultado.append(asin)
     return resultado
 
-
 async def _filtrar_recursos(route):
     req = route.request
     if req.resource_type in ("image", "media", "font") or any(d in req.url for d in BLOQUEAR_DOMINIOS):
@@ -124,19 +112,16 @@ async def _filtrar_recursos(route):
     else:
         await route.continue_()
 
-
 async def nueva_pagina_amazon(context):
     page = await context.new_page()
     await page.route("**/*", _filtrar_recursos)
     return page
-
 
 async def hay_captcha(page):
     try:
         return await page.locator("form[action*='validateCaptcha'], input#captchacharacters").count() > 0
     except Exception:
         return False
-
 
 async def recoger_asins(context, url, sem):
     async with sem:
@@ -165,10 +150,7 @@ async def recoger_asins(context, url, sem):
                 if a not in asins:
                     asins.append(a)
 
-            print(f"🔎 {len(asins):>3} ASINs | {len(hrefs)} enlaces | título={titulo!r} | {url}")
-            if not asins:
-                ejemplos = [h for h in hrefs if h][:6]
-                print(f"   ⚠️ Sin ASINs. Ejemplos de enlaces que ve el bot: {ejemplos}")
+            print(f"🔎 {len(asins):>3} ASINs | {url}")
             return asins
         except Exception as exc:
             print(f"⚠️ Error rastreando {url}: {exc}")
@@ -176,11 +158,12 @@ async def recoger_asins(context, url, sem):
         finally:
             await page.close()
 
-
+# ESTE BLOQUE HA SIDO REESCRITO PARA BUSCAR SOLO EN LA COLUMNA CENTRAL (#centerCol)
 JS_EXTRAER = """() => {
+  const centro = document.querySelector('#centerCol') || document.body;
   const primero = (sels) => {
     for (const s of sels) {
-      const e = document.querySelector(s);
+      const e = centro.querySelector(s);
       if (e && e.textContent && e.textContent.trim()) return e.textContent.trim();
     }
     return null;
@@ -191,13 +174,11 @@ JS_EXTRAER = """() => {
     imgUrl = img.getAttribute('data-old-hires') || img.getAttribute('src');
     if (imgUrl && imgUrl.startsWith('data:')) imgUrl = null;
   }
-  const centro = document.querySelector('#centerCol');
   return {
     titulo: primero(['#productTitle']),
     actual: primero([
       '#corePriceDisplay_desktop_feature_div .priceToPay .a-offscreen',
       '#corePrice_feature_div .priceToPay .a-offscreen',
-      '.priceToPay .a-offscreen',
       '#corePriceDisplay_desktop_feature_div .a-price:not(.a-text-price) .a-offscreen',
       '#corePrice_feature_div .a-price:not(.a-text-price) .a-offscreen',
       '#priceblock_dealprice', '#priceblock_ourprice'
@@ -205,7 +186,6 @@ JS_EXTRAER = """() => {
     antes: primero([
       '#corePriceDisplay_desktop_feature_div .basisPrice .a-offscreen',
       '#corePrice_feature_div .basisPrice .a-offscreen',
-      '.basisPrice .a-offscreen',
       '#corePriceDisplay_desktop_feature_div .a-price.a-text-price .a-offscreen',
       '#corePrice_feature_div .a-price.a-text-price .a-offscreen',
       '.a-price.a-text-price[data-a-strike="true"] .a-offscreen',
@@ -219,7 +199,7 @@ JS_EXTRAER = """() => {
     prime: !!document.querySelector(
       '#buybox i.a-icon-prime, #desktop_buybox i.a-icon-prime, #mir-layout-DELIVERY_BLOCK i.a-icon-prime'
     ),
-    centro: centro ? centro.innerText.slice(0, 8000) : '',
+    centro: centro.innerText ? centro.innerText.slice(0, 8000) : '',
     imagen: imgUrl
   };
 }"""
@@ -229,9 +209,7 @@ RE_MINIMO_30D = re.compile(
     re.I | re.S,
 )
 
-
 async def verificar_producto(context, asin, sem):
-    """Comprueba el precio real en Amazon. Devuelve el chollo si el descuento es >= PISO_ABSOLUTO."""
     async with sem:
         page = await nueva_pagina_amazon(context)
         try:
@@ -291,9 +269,7 @@ async def verificar_producto(context, asin, sem):
         finally:
             await page.close()
 
-
 def elegir_con_escalera(validos):
-    """Elige el mejor chollo bajando el listón de descuento solo si hace falta."""
     for umbral in ESCALERA:
         cand = [c for c in validos if c["descuento_porcentaje"] >= umbral]
         if cand:
@@ -303,15 +279,12 @@ def elegir_con_escalera(validos):
             return cand[0]
     return None
 
-
 async def buscar_chollo(context, historial):
     sem = asyncio.Semaphore(CONCURRENCIA)
 
-    # 1) Fuentes prioritarias (SaveMoney)
     res_prio = await asyncio.gather(*(recoger_asins(context, u, sem) for u in FUENTES_PRIORITARIAS))
     ordenados = intercalar(res_prio)
 
-    # 2) Si SaveMoney da pocos productos, añadimos las páginas de Amazon
     if len(ordenados) < 10:
         print(f"ℹ️ Solo {len(ordenados)} ASINs de SaveMoney; añado fuentes de respaldo de Amazon.")
         res_sec = await asyncio.gather(*(recoger_asins(context, u, sem) for u in FUENTES_SECUNDARIAS))
@@ -322,7 +295,7 @@ async def buscar_chollo(context, historial):
     print(f"📦 {len(ordenados)} ASINs recogidos, {len(pendientes)} nuevos (no publicados antes).")
 
     if not pendientes:
-        raise SinChollo("No hay productos nuevos que revisar (0 ASINs extraídos o todos ya publicados).")
+        raise SinChollo("No hay productos nuevos que revisar.")
 
     print(f"🧪 Verificando en Amazon {len(pendientes)} productos...")
     validos = []
@@ -338,12 +311,8 @@ async def buscar_chollo(context, historial):
 
     elegido = elegir_con_escalera(validos)
     if not elegido:
-        raise SinChollo(
-            f"Ningún producto de los {len(pendientes)} revisados tiene un descuento verificable "
-            f"de al menos {PISO_ABSOLUTO:.0f}% ahora mismo."
-        )
+        raise SinChollo(f"Ningún producto revisado tiene un descuento real de al menos {PISO_ABSOLUTO:.0f}%.")
     return elegido
-
 
 def cargar_fuente(tamano, negrita=False):
     rutas = [
@@ -357,7 +326,6 @@ def cargar_fuente(tamano, negrita=False):
             except Exception:
                 pass
     return ImageFont.load_default()
-
 
 def crear_imagen_chollo(descuento, precio_actual, precio_antes, ruta_salida, es_prime=False, posible_error=False):
     W, H = 800, 440
@@ -393,12 +361,11 @@ def crear_imagen_chollo(descuento, precio_actual, precio_antes, ruta_salida, es_
         draw.line([(48, 348), (62, 366), (92, 326)], fill=(255, 153, 0), width=9)
         draw.text((98, 315), "prime", font=f_prime, fill=(0, 113, 197))
     if posible_error:
-        draw.text((330, 335), "¡POSIBLE ERROR DE PRECIO!", font=f_alerta, fill=(204, 12, 57))
+        draw.text((160, 335), "¡POSIBLE ERROR DE PRECIO!", font=f_alerta, fill=(204, 12, 57))
 
     draw.rectangle([(2, 2), (W - 3, H - 3)], outline=(225, 228, 228), width=3)
     img.save(ruta_salida, quality=95)
     return ruta_salida
-
 
 def publicar_en_telegram(imagen_url, imagen_local, texto_mensaje):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
@@ -418,7 +385,6 @@ def publicar_en_telegram(imagen_url, imagen_local, texto_mensaje):
                 if r.status_code == 200:
                     print("✅ Telegram: publicado con la imagen original.")
                     return True
-                print(f"⚠️ Telegram rechazó la imagen original ({r.status_code}): {r.text[:200]}")
             except requests.RequestException as exc:
                 print(f"⚠️ Telegram (imagen original): {exc}")
 
@@ -432,12 +398,10 @@ def publicar_en_telegram(imagen_url, imagen_local, texto_mensaje):
         if r.status_code == 200:
             print("✅ Telegram: publicado con la imagen generada.")
             return True
-        print(f"::warning::Telegram falló ({r.status_code}): {r.text[:300]}")
         return False
     except Exception as exc:
         print(f"::warning::Error con Telegram: {exc}")
         return False
-
 
 async def publicar_en_x(context, texto_x, ruta_img):
     page = await context.new_page()
@@ -488,14 +452,9 @@ async def publicar_en_x(context, texto_x, ruta_img):
 
     except Exception as exc:
         print(f"::warning::Error publicando en X: {exc}")
-        try:
-            await page.screenshot(path="error.png", full_page=True)
-        except Exception:
-            pass
         return False
     finally:
         await page.close()
-
 
 async def ejecutar_bot():
     tg_cfg = bool(TELEGRAM_TOKEN and TELEGRAM_CHAT_ID)
@@ -583,7 +542,6 @@ async def ejecutar_bot():
             return False
         finally:
             await browser.close()
-
 
 if __name__ == "__main__":
     ok = asyncio.run(ejecutar_bot())
