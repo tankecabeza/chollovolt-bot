@@ -38,10 +38,7 @@ USER_AGENT = (
     "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 )
 
-# Fuentes donde suelen aparecer descuentos fuertes y errores de precio:
-# - goldbox: ofertas del día
-# - movers-and-shakers: productos que se disparan en ventas (típico de un error de precio)
-# - búsquedas filtradas por "descuento 50 % o más" (filtro p_8 de Amazon)
+# Fuentes donde suelen aparecer descuentos fuertes y errores de precio
 FUENTES_PRIORITARIAS = [
     "https://www.amazon.es/gp/goldbox",
     "https://www.amazon.es/gp/movers-and-shakers/electronics",
@@ -256,8 +253,7 @@ async def verificar_producto(context, asin, sem):
                 print(f"   🗑️  {asin}: {pct}% descartado (lectura sospechosa)")
                 return None
 
-            # La etiqueta de descuento de Amazon debe coincidir con el cálculo;
-            # si no, probablemente se ha leído el precio equivocado.
+            # La etiqueta de descuento de Amazon debe coincidir con el cálculo
             m_badge = re.search(r"(\d{1,2})\s*%", d.get("badge") or "")
             if m_badge and abs(int(m_badge.group(1)) - pct) > 8:
                 print(f"   🗑️  {asin}: etiqueta {m_badge.group(1)}% ≠ cálculo {pct}% (descartado)")
@@ -376,7 +372,8 @@ def crear_imagen_chollo(descuento, precio_actual, precio_antes, ruta_salida, es_
         draw.line([(48, 348), (62, 366), (92, 326)], fill=(255, 153, 0), width=9)
         draw.text((98, 315), "prime", font=f_prime, fill=(0, 113, 197))
     if posible_error:
-        draw.text((330, 335), "¡POSIBLE ERROR DE PRECIO!", font=f_alerta, fill=(204, 12, 57))
+        # ¡Ajuste aplicado para que no se corte en X!
+        draw.text((160, 335), "¡POSIBLE ERROR DE PRECIO!", font=f_alerta, fill=(204, 12, 57))
 
     draw.rectangle([(2, 2), (W - 3, H - 3)], outline=(225, 228, 228), width=3)
     img.save(ruta_salida, quality=95)
@@ -425,7 +422,7 @@ def publicar_en_telegram(imagen_url, imagen_local, texto_mensaje):
 
 
 # ==============================================================================
-# X (mismo flujo que tu versión que funciona)
+# X
 # ==============================================================================
 async def publicar_en_x(context, texto_x, ruta_img):
     page = await context.new_page()
@@ -469,7 +466,6 @@ async def publicar_en_x(context, texto_x, ruta_img):
                 await editor.focus()
                 await page.keyboard.press("Control+Enter")
 
-        # En lugar de esperar 6 s fijos, esperamos a que el compositor se cierre (máx. 8 s).
         try:
             await editor.wait_for(state="hidden", timeout=8000)
             print("✅ X: publicado (el compositor se cerró).")
