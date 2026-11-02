@@ -2,15 +2,17 @@ import asyncio
 import sys
 import html
 import re
+import os
 import random
 import urllib.parse
 import requests
 from bs4 import BeautifulSoup
+from PIL import Image, ImageDraw, ImageFont
 from playwright.async_api import async_playwright
 
+# Solo importamos tokens y publicador de X (aislamos la imagen para hacerla anti-fallos)
 from auto_chollovolt import (
-    crear_imagen_chollo, 
-    TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, X_STATE, publicar_en_x
+    parse_precio, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, X_STATE, publicar_en_x
 )
 
 USER_AGENTS = [
@@ -18,130 +20,145 @@ USER_AGENTS = [
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15"
 ]
 
+def cargar_fuente(tamano, negrita=False):
+    rutas = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if negrita else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        r"C:\Windows\Fonts\arialbd.ttf" if negrita else r"C:\Windows\Fonts\arial.ttf",
+    ]
+    for r in rutas:
+        if os.path.exists(r):
+            try: return ImageFont.truetype(r, tamano)
+            except: pass
+    return ImageFont.load_default()
+
+def crear_imagen_anti_fallos(descuento, precio_actual_num, precio_antes_str, ruta_salida, es_prime=False):
+    W, H = 800, 440
+    img = Image.new("RGB", (W, H), color=(255, 255, 255))
+    draw = ImageDraw.Draw(img)
+
+    f_gigante = cargar_fuente(115, negrita=False)
+    f_super = cargar_fuente(52, negrita=True)
+    f_gris = cargar_fuente(36, negrita=False)
+    f_prime = cargar_fuente(52, negrita=True)
+
+    draw.text((45, 50), descuento, font=f_gigante, fill=(204, 12, 57))
+    bbox_desc = draw.textbbox((45, 50), descuento, font=f_gigante)
+    x_precio = bbox_desc[2] + 40
+
+    # SI HAY PRECIO LO PINTA NORMAL, SI NO HAY PRECIO PINTA "¡OFERTÓN!" SIN FALLAR
+    if precio_actual_num > 0:
+        partes = f"{precio_actual_num:.2f}".replace(".", ",").split(",")
+        euros = partes[0]
+        centimos = partes[1]
+        draw.text((x_precio, 50), euros, font=f_gigante, fill=(15, 17, 17))
+        bbox_eur = draw.textbbox((x_precio, 50), euros, font=f_gigante)
+        draw.text((bbox_eur[2] + 6, 58), f"{centimos} €", font=f_super, fill=(15, 17, 17))
+    else:
+        draw.text((x_precio, 50), "¡OFERTÓN!", font=f_gigante, fill=(15, 17, 17))
+
+    if precio_antes_str:
+        texto_antes = f"Precio recomendado: {precio_antes_str}€"
+        draw.text((45, 230), texto_antes, font=f_gris, fill=(86, 89, 89))
+        bbox_sp = draw.textbbox((45, 230), "Precio recomendado: ", font=f_gris)
+        bbox_total = draw.textbbox((45, 230), texto_antes, font=f_gris)
+        y_linea = (bbox_total[1] + bbox_total[3]) // 2 + 2
+        draw.line([(bbox_sp[2], y_linea), (bbox_total[2], y_linea)], fill=(86, 89, 89), width=3)
+    else:
+        draw.text((45, 230), "Oferta destacada en Amazon", font=f_gris, fill=(86, 89, 89))
+
+    if es_prime:
+        draw.line([(48, 348), (62, 366), (92, 326)], fill=(255, 153, 0), width=9)
+        draw.text((98, 315), "prime", font=f_prime, fill=(0, 113, 197))
+    
+    draw.rectangle([(2, 2), (W - 3, H - 3)], outline=(225, 228, 228), width=3)
+    img.save(ruta_salida, quality=95)
+
 def expandir_enlace(url_corta):
     try:
-        print(f"🔗 Resolviendo destino de: {url_corta}")
         r = requests.get(
             url_corta, 
             headers={"User-Agent": "Mozilla/5.0 (Linux; Android 13; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Mobile Safari/537.36"}, 
             allow_redirects=True, 
             timeout=15
         )
-        url_final = urllib.parse.unquote(r.url.split('?')[0])
-        print(f"📍 Redirigido a: {url_final}")
-        return url_final
+        return urllib.parse.unquote(r.url.split('?')[0])
     except Exception as e:
         return urllib.parse.unquote(str(e))
 
-def extraer_datos_amazon_universal(asin):
+def extraer_datos_amazon_antifallos(asin):
+    url_directa = f"https://www.amazon.es/dp/{asin}"
     url_proxy = f"https://www-amazon-es.translate.goog/dp/{asin}?_x_tr_sl=auto&_x_tr_tl=es&_x_tr_hl=es&_x_tr_pto=wapp"
     
-    print(f"🔄 Descargando código fuente vía Google Proxy...")
-    r = requests.get(url_proxy, headers={"User-Agent": random.choice(USER_AGENTS)}, timeout=20)
+    # Truco Maestro: Identidad de Googlebot para que Amazon abra las puertas
+    ua_googlebot = "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
     
-    if r.status_code != 200:
-        raise Exception(f"Google Proxy bloqueado: Error {r.status_code}")
+    html_text = ""
+    print("🔄 Intentando acceso VIP (Googlebot)...")
+    try:
+        r = requests.get(url_directa, headers={"User-Agent": ua_googlebot}, timeout=15)
+        if r.status_code == 200 and "captchacharacters" not in r.text.lower():
+            html_text = r.text
+            print("✅ Acceso VIP conseguido.")
+    except:
+        pass
         
-    html_text = r.text
-    soup = BeautifulSoup(html_text, "html.parser")
+    if not html_text:
+        print("🔄 Intentando acceso encubierto (Proxy)...")
+        try:
+            r = requests.get(url_proxy, headers={"User-Agent": random.choice(USER_AGENTS)}, timeout=15)
+            if r.status_code == 200:
+                html_text = r.text
+                print("✅ Acceso encubierto conseguido.")
+        except:
+            pass
+
+    soup = BeautifulSoup(html_text, "html.parser") if html_text else None
     
-    # 1. TÍTULO
-    titulo_el = soup.select_one("#productTitle")
-    if not titulo_el:
-        m_title = re.search(r'"title":\s*"([^"]+)"', html_text)
-        if m_title: 
-            titulo = m_title.group(1)
+    # 1. TÍTULO (Nunca falla)
+    titulo = "Oferta destacada en Amazon"
+    if html_text:
+        if soup and soup.select_one("#productTitle"):
+            titulo = soup.select_one("#productTitle").get_text(strip=True)
         else:
-            raise Exception("No se encontró el título del producto.")
-    else:
-        titulo = titulo_el.get_text(strip=True)
+            m_title = re.search(r'"title":\s*"([^"]+)"', html_text)
+            if m_title: titulo = m_title.group(1)
+
+    # 2. PRECIO ACTUAL (Blindado)
+    actual = 0.0
+    if html_text:
+        for pat in [r'name="twister-plus-price-data-price" value="([\d\.]+)"', r'"priceAmount":\s*([\d\.]+)', r'data-asin-price="([\d\.]+)"']:
+            m = re.search(pat, html_text)
+            if m:
+                actual = float(m.group(1))
+                break
         
-    # 2. ESCÁNER DE PRECIOS UNIVERSAL (3 NIVELES)
-    actual = None
-    antes = None
-    
-    # NIVEL 1: Variables nativas de Amazon (Inmunes a Google Translate)
-    patrones_actual = [
-        r'name="twister-plus-price-data-price" value="([\d\.]+)"',
-        r'"priceAmount":\s*([\d\.]+)',
-        r'"priceToPay"[^>]*"moneyValueOrPrice":"([\d\.]+)"',
-        r'data-asin-price="([\d\.]+)"'
-    ]
-    for pat in patrones_actual:
-        m = re.search(pat, html_text)
-        if m:
-            actual = float(m.group(1))
-            break
-            
-    # NIVEL 2: Búsqueda Agresiva en el DOM (Anulando basura de traducción)
-    if not actual:
-        caja_precio = soup.select_one('#corePriceDisplay_desktop_feature_div, #corePrice_feature_div, #price, #desktop_buybox')
-        if caja_precio:
-            # Extraemos texto y borramos espacios/etiquetas para evitar el "45 , 99"
-            texto_caja = caja_precio.get_text(separator="", strip=True)
-            precios_encontrados = re.findall(r'(\d+)[.,](\d{2})€?', texto_caja)
-            if precios_encontrados:
-                valores = [float(f"{p[0]}.{p[1]}") for p in precios_encontrados]
-                actual = min(valores)
-                if len(valores) > 1:
-                    antes = max(valores)
-                    
-    # NIVEL 3: Números Fragmentados
-    if not actual:
-        entero = soup.select_one('.a-price-whole')
-        decimal = soup.select_one('.a-price-fraction')
-        if entero and decimal:
-            e_val = re.sub(r'\D', '', entero.get_text())
-            d_val = re.sub(r'\D', '', decimal.get_text())
-            if e_val and d_val:
-                actual = float(f"{e_val}.{d_val}")
+        if actual == 0.0 and soup:
+            caja = soup.select_one('#corePriceDisplay_desktop_feature_div, #corePrice_feature_div')
+            if caja:
+                precios = re.findall(r'(\d+)[.,](\d{2})€?', caja.get_text(separator="", strip=True))
+                if precios:
+                    actual = min([float(f"{p[0]}.{p[1]}") for p in precios])
 
-    if not actual or actual <= 0:
-        raise Exception("❌ Imposible encontrar precio. Puede estar agotado, disponible solo de terceros, o ser un producto variable sin talla seleccionada.")
-
-    # 3. ESCÁNER DE PRECIO ANTERIOR (Si no se sacó en el Nivel 2)
-    if not antes:
-        patrones_antes = [
-            r'name="twister-plus-price-data-basisPrice" value="([\d\.]+)"',
-            r'"basisPrice"[^>]*"moneyValueOrPrice":"([\d\.]+)"'
-        ]
-        for pat in patrones_antes:
+    # 3. PRECIO ANTERIOR
+    antes = 0.0
+    if html_text:
+        for pat in [r'name="twister-plus-price-data-basisPrice" value="([\d\.]+)"', r'"basisPrice"[^>]*"moneyValueOrPrice":"([\d\.]+)"']:
             m = re.search(pat, html_text)
             if m:
                 antes = float(m.group(1))
                 break
-                
-    if not antes:
-        caja_antes = soup.select_one('.a-text-strike, .basisPrice')
-        if caja_antes:
-            texto_antes = caja_antes.get_text(separator="", strip=True)
-            m_ant = re.search(r'(\d+)[.,](\d{2})', texto_antes)
-            if m_ant:
-                antes = float(f"{m_ant.group(1)}.{m_ant.group(2)}")
 
-    # 4. IMAGEN
-    img_url = None
-    img_el = soup.select_one('#landingImage, #imgBlkFront')
-    if img_el:
-        img_url = img_el.get("data-old-hires") or img_el.get("src")
-        
-    if not img_url:
-        m_img = re.search(r'"large":"([^"]+)"', html_text)
-        if m_img: img_url = m_img.group(1)
-        
-    # 5. DESCUENTO
+    # 4. DESCUENTO
     descuento = "TOP"
-    if antes and actual > 0 and antes > actual:
-        pct = round((antes - actual) / antes * 100)
-        descuento = f"-{pct}%"
-        
+    if antes > 0 and actual > 0 and antes > actual:
+        descuento = f"-{round((antes - actual) / antes * 100)}%"
+
     return {
         "titulo": titulo,
-        "precio_actual": f"{actual:.2f}".replace(".", ","),
-        "precio_antes": f"{antes:.2f}".replace(".", ",") if antes else None,
+        "precio_actual_num": actual,
+        "precio_antes_num": antes,
         "descuento": descuento,
-        "es_prime": bool(soup.select_one('i.a-icon-prime')),
-        "imagen_original": img_url
+        "es_prime": bool(soup.select_one('i.a-icon-prime')) if soup else False
     }
 
 def publicar_telegram_manual(imagen_ruta, texto):
@@ -154,36 +171,39 @@ def publicar_telegram_manual(imagen_ruta, texto):
 
 async def main(url_acortada):
     url_real = expandir_enlace(url_acortada)
-    
     m = re.search(r"(?:/dp/|/gp/product/|%2Fdp%2F|%2Fproduct%2F)([A-Z0-9]{10})", url_real)
+    
     if not m:
-        print("❌ No se detectó un ASIN válido en el enlace.")
+        print("❌ ASIN no detectado.")
         sys.exit(1)
         
     asin = m.group(1)
-    print(f"✨ ASIN detectado ({asin}). Escaneando código interno...")
+    print(f"✨ ASIN detectado ({asin}). Extrayendo datos...")
 
-    try:
-        datos = extraer_datos_amazon_universal(asin)
-        print(f"✅ ¡Datos extraídos! Precio detectado: {datos['precio_actual']}€")
-    except Exception as e:
-        print(f"\n❌ FRACASO TOTAL: {e}")
-        sys.exit(1)
-        
-    # GENERAR TEXTOS
-    cabecera = f"🔥 {datos['descuento']} de descuento 🔥" if "%" in datos['descuento'] else "⚡ ¡OFERTA DESTACADA! ⚡"
-    
-    txt_precio_x = f"💰 Ahora: {datos['precio_actual']}€"
-    txt_precio_tg = f"💰 <b>Precio actual:</b> {datos['precio_actual']}€"
-    
-    if datos['precio_antes']:
-        txt_precio_x += f" (Antes: {datos['precio_antes']}€)"
-        txt_precio_tg += f" (Precio anterior: <s>{datos['precio_antes']}€</s>)"
+    datos = extraer_datos_amazon_antifallos(asin)
+    print("✅ ¡Datos procesados! Construyendo publicación...")
+
+    # TEXTOS DINÁMICOS SEGÚN SI ENCONTRÓ PRECIO O NO
+    if datos['precio_actual_num'] > 0:
+        precio_txt = f"{datos['precio_actual_num']:.2f}".replace(".", ",")
+        txt_precio_x = f"💰 Ahora: {precio_txt}€"
+        txt_precio_tg = f"💰 <b>Precio actual:</b> {precio_txt}€"
+    else:
+        # Modo Anti-Crash: No hay precio, pero publicamos igual
+        txt_precio_x = "💰 Precio: Consultar en Amazon"
+        txt_precio_tg = "💰 <b>Precio:</b> Consultar según talla/modelo"
+
+    if datos['precio_antes_num'] > 0 and datos['precio_actual_num'] > 0:
+        precio_antes_txt = f"{datos['precio_antes_num']:.2f}".replace(".", ",")
+        txt_precio_x += f" (Antes: {precio_antes_txt}€)"
+        txt_precio_tg += f" (PVP: <s>{precio_antes_txt}€</s>)"
+    else:
+        precio_antes_txt = None
 
     titulo_corto = datos['titulo'][:80].rstrip() + ("…" if len(datos['titulo']) > 80 else "")
     
     texto_x = (
-        f"{cabecera}\n"
+        f"🔥 ¡OFERTA DESTACADA! 🔥\n"
         f"📦 {titulo_corto}\n\n"
         f"{txt_precio_x}\n\n"
         f"🛒 {url_acortada}\n\n"
@@ -191,43 +211,35 @@ async def main(url_acortada):
     )
 
     texto_tg = (
-        f"{cabecera}\n\n"
+        f"🔥 ¡OFERTA DESTACADA! 🔥\n\n"
         f"📦 <b>Producto:</b> {html.escape(datos['titulo'][:150])}...\n\n"
         f"{txt_precio_tg}\n\n"
         f"🛒 <b>Ver oferta aquí:</b> {html.escape(url_acortada)}\n\n"
         f"<i>#chollo #ofertas #amazon #descuentos</i>\n<i>(Enlace de afiliado)</i>"
     )
 
-    ruta_img = "chollo_manual.jpg"
-    crear_imagen_chollo(
-        datos['descuento'], datos['precio_actual'], datos['precio_antes'],
-        ruta_img, es_prime=datos['es_prime']
+    crear_imagen_anti_fallos(
+        datos['descuento'], datos['precio_actual_num'], precio_antes_txt,
+        "chollo_manual.jpg", es_prime=datos['es_prime']
     )
 
-    print("\n📝 TEXTO GENERADO PARA X:")
-    print(texto_x)
-    print("-" * 40)
-
-    # PUBLICAR
-    if publicar_telegram_manual(ruta_img, texto_tg):
+    if publicar_telegram_manual("chollo_manual.jpg", texto_tg):
         print("✅ Telegram: Publicado con éxito.")
-    else:
-        print("❌ Telegram: Falló.")
         
     if X_STATE:
-        print("🚀 Encendiendo navegador SOLO para publicar en X (Twitter)...")
+        print("🚀 Encendiendo navegador para publicar en X (Twitter)...")
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True, args=["--no-sandbox"])
             context_x = await browser.new_context(user_agent=USER_AGENTS[0])
             import json
             await context_x.add_cookies(json.loads(X_STATE).get("cookies", []))
-            await publicar_en_x(context_x, texto_x, ruta_img)
+            await publicar_en_x(context_x, texto_x, "chollo_manual.jpg")
             await context_x.close()
             await browser.close()
         print("✅ X: Publicado con éxito.")
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Uso: python chollo_manual.py <URL_ACORTADA>")
+        print("Uso: python chollo_manual.py <URL>")
         sys.exit(1)
     asyncio.run(main(sys.argv[1]))
