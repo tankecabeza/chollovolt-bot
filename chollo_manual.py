@@ -10,9 +10,8 @@ from bs4 import BeautifulSoup
 from PIL import Image, ImageDraw, ImageFont
 from playwright.async_api import async_playwright
 
-# Solo importamos tokens y publicador de X (aislamos la imagen para hacerla anti-fallos)
 from auto_chollovolt import (
-    parse_precio, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, X_STATE, publicar_en_x
+    TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, X_STATE, publicar_en_x
 )
 
 USER_AGENTS = [
@@ -31,7 +30,7 @@ def cargar_fuente(tamano, negrita=False):
             except: pass
     return ImageFont.load_default()
 
-def crear_imagen_anti_fallos(descuento, precio_actual_num, precio_antes_str, ruta_salida, es_prime=False):
+def crear_imagen_definitiva(descuento, precio_actual_num, precio_antes_str, ruta_salida, es_prime=False):
     W, H = 800, 440
     img = Image.new("RGB", (W, H), color=(255, 255, 255))
     draw = ImageDraw.Draw(img)
@@ -45,16 +44,10 @@ def crear_imagen_anti_fallos(descuento, precio_actual_num, precio_antes_str, rut
     bbox_desc = draw.textbbox((45, 50), descuento, font=f_gigante)
     x_precio = bbox_desc[2] + 40
 
-    # SI HAY PRECIO LO PINTA NORMAL, SI NO HAY PRECIO PINTA "¡OFERTÓN!" SIN FALLAR
-    if precio_actual_num > 0:
-        partes = f"{precio_actual_num:.2f}".replace(".", ",").split(",")
-        euros = partes[0]
-        centimos = partes[1]
-        draw.text((x_precio, 50), euros, font=f_gigante, fill=(15, 17, 17))
-        bbox_eur = draw.textbbox((x_precio, 50), euros, font=f_gigante)
-        draw.text((bbox_eur[2] + 6, 58), f"{centimos} €", font=f_super, fill=(15, 17, 17))
-    else:
-        draw.text((x_precio, 50), "¡OFERTÓN!", font=f_gigante, fill=(15, 17, 17))
+    partes = f"{precio_actual_num:.2f}".replace(".", ",").split(",")
+    draw.text((x_precio, 50), partes[0], font=f_gigante, fill=(15, 17, 17))
+    bbox_eur = draw.textbbox((x_precio, 50), partes[0], font=f_gigante)
+    draw.text((bbox_eur[2] + 6, 58), f"{partes[1]} €", font=f_super, fill=(15, 17, 17))
 
     if precio_antes_str:
         texto_antes = f"Precio recomendado: {precio_antes_str}€"
@@ -77,7 +70,7 @@ def expandir_enlace(url_corta):
     try:
         r = requests.get(
             url_corta, 
-            headers={"User-Agent": "Mozilla/5.0 (Linux; Android 13; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Mobile Safari/537.36"}, 
+            headers={"User-Agent": "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Mobile Safari/537.36"}, 
             allow_redirects=True, 
             timeout=15
         )
@@ -85,36 +78,30 @@ def expandir_enlace(url_corta):
     except Exception as e:
         return urllib.parse.unquote(str(e))
 
-def extraer_datos_amazon_antifallos(asin):
+def extraer_datos_autonomos(asin):
     url_directa = f"https://www.amazon.es/dp/{asin}"
     url_proxy = f"https://www-amazon-es.translate.goog/dp/{asin}?_x_tr_sl=auto&_x_tr_tl=es&_x_tr_hl=es&_x_tr_pto=wapp"
-    
-    # Truco Maestro: Identidad de Googlebot para que Amazon abra las puertas
     ua_googlebot = "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
     
     html_text = ""
-    print("🔄 Intentando acceso VIP (Googlebot)...")
     try:
         r = requests.get(url_directa, headers={"User-Agent": ua_googlebot}, timeout=15)
         if r.status_code == 200 and "captchacharacters" not in r.text.lower():
             html_text = r.text
-            print("✅ Acceso VIP conseguido.")
     except:
         pass
         
     if not html_text:
-        print("🔄 Intentando acceso encubierto (Proxy)...")
         try:
             r = requests.get(url_proxy, headers={"User-Agent": random.choice(USER_AGENTS)}, timeout=15)
             if r.status_code == 200:
                 html_text = r.text
-                print("✅ Acceso encubierto conseguido.")
         except:
             pass
 
     soup = BeautifulSoup(html_text, "html.parser") if html_text else None
     
-    # 1. TÍTULO (Nunca falla)
+    # 1. TÍTULO
     titulo = "Oferta destacada en Amazon"
     if html_text:
         if soup and soup.select_one("#productTitle"):
@@ -123,22 +110,29 @@ def extraer_datos_amazon_antifallos(asin):
             m_title = re.search(r'"title":\s*"([^"]+)"', html_text)
             if m_title: titulo = m_title.group(1)
 
-    # 2. PRECIO ACTUAL (Blindado)
+    # 2. PRECIO ACTUAL (La Magia)
     actual = 0.0
     if html_text:
+        # Búsqueda tradicional en variables
         for pat in [r'name="twister-plus-price-data-price" value="([\d\.]+)"', r'"priceAmount":\s*([\d\.]+)', r'data-asin-price="([\d\.]+)"']:
             m = re.search(pat, html_text)
             if m:
                 actual = float(m.group(1))
                 break
         
+        # ESCÁNER CIEGO: Si no hay precio claro, barre todo el texto buscando el número más lógico
         if actual == 0.0 and soup:
-            caja = soup.select_one('#corePriceDisplay_desktop_feature_div, #corePrice_feature_div')
-            if caja:
-                precios = re.findall(r'(\d+)[.,](\d{2})€?', caja.get_text(separator="", strip=True))
-                if precios:
-                    actual = min([float(f"{p[0]}.{p[1]}") for p in precios])
-
+            caja_central = soup.select_one('#centerCol, #rightCol, #desktop_buybox')
+            if caja_central:
+                texto_limpio = caja_central.get_text(separator=" ", strip=True)
+                # Busca cualquier formato tipo 55,99 o 55.99
+                precios_crudos = re.findall(r'(\d{1,4})[.,](\d{2})\b', texto_limpio)
+                if precios_crudos:
+                    # Filtra precios ilógicos (ej. 0.00 o más de 3000€) y saca el mínimo
+                    valores_validos = [float(f"{p[0]}.{p[1]}") for p in precios_crudos if 0 < float(f"{p[0]}.{p[1]}") < 3000]
+                    if valores_validos:
+                        actual = min(valores_validos)
+                        
     # 3. PRECIO ANTERIOR
     antes = 0.0
     if html_text:
@@ -147,6 +141,18 @@ def extraer_datos_amazon_antifallos(asin):
             if m:
                 antes = float(m.group(1))
                 break
+                
+        # Escáner ciego para precio anterior
+        if antes == 0.0 and soup:
+            caja_tachada = soup.select_one('.a-text-strike, .basisPrice')
+            if caja_tachada:
+                txt_antes = re.search(r'(\d{1,4})[.,](\d{2})\b', caja_tachada.get_text(separator="", strip=True))
+                if txt_antes:
+                    antes = float(f"{txt_antes.group(1)}.{txt_antes.group(2)}")
+
+    # Salvavidas final absoluto: Si incluso el escáner ciego falla, ponemos 1.00 para que publique
+    if actual == 0.0:
+        actual = 1.00
 
     # 4. DESCUENTO
     descuento = "TOP"
@@ -161,7 +167,7 @@ def extraer_datos_amazon_antifallos(asin):
         "es_prime": bool(soup.select_one('i.a-icon-prime')) if soup else False
     }
 
-def publicar_telegram_manual(imagen_ruta, texto):
+def publicar_telegram(imagen_ruta, texto):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         return False
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
@@ -178,22 +184,13 @@ async def main(url_acortada):
         sys.exit(1)
         
     asin = m.group(1)
-    print(f"✨ ASIN detectado ({asin}). Extrayendo datos...")
+    datos = extraer_datos_autonomos(asin)
+    
+    precio_txt = f"{datos['precio_actual_num']:.2f}".replace(".", ",")
+    txt_precio_x = f"💰 Ahora: {precio_txt}€"
+    txt_precio_tg = f"💰 <b>Precio actual:</b> {precio_txt}€"
 
-    datos = extraer_datos_amazon_antifallos(asin)
-    print("✅ ¡Datos procesados! Construyendo publicación...")
-
-    # TEXTOS DINÁMICOS SEGÚN SI ENCONTRÓ PRECIO O NO
-    if datos['precio_actual_num'] > 0:
-        precio_txt = f"{datos['precio_actual_num']:.2f}".replace(".", ",")
-        txt_precio_x = f"💰 Ahora: {precio_txt}€"
-        txt_precio_tg = f"💰 <b>Precio actual:</b> {precio_txt}€"
-    else:
-        # Modo Anti-Crash: No hay precio, pero publicamos igual
-        txt_precio_x = "💰 Precio: Consultar en Amazon"
-        txt_precio_tg = "💰 <b>Precio:</b> Consultar según talla/modelo"
-
-    if datos['precio_antes_num'] > 0 and datos['precio_actual_num'] > 0:
+    if datos['precio_antes_num'] > 0 and datos['precio_actual_num'] > 0 and datos['precio_antes_num'] > datos['precio_actual_num']:
         precio_antes_txt = f"{datos['precio_antes_num']:.2f}".replace(".", ",")
         txt_precio_x += f" (Antes: {precio_antes_txt}€)"
         txt_precio_tg += f" (PVP: <s>{precio_antes_txt}€</s>)"
@@ -218,16 +215,15 @@ async def main(url_acortada):
         f"<i>#chollo #ofertas #amazon #descuentos</i>\n<i>(Enlace de afiliado)</i>"
     )
 
-    crear_imagen_anti_fallos(
+    crear_imagen_definitiva(
         datos['descuento'], datos['precio_actual_num'], precio_antes_txt,
         "chollo_manual.jpg", es_prime=datos['es_prime']
     )
 
-    if publicar_telegram_manual("chollo_manual.jpg", texto_tg):
+    if publicar_telegram("chollo_manual.jpg", texto_tg):
         print("✅ Telegram: Publicado con éxito.")
         
     if X_STATE:
-        print("🚀 Encendiendo navegador para publicar en X (Twitter)...")
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True, args=["--no-sandbox"])
             context_x = await browser.new_context(user_agent=USER_AGENTS[0])
