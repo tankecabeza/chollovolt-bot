@@ -118,7 +118,7 @@ def extraer_datos_francotirador(asin):
     actual = 0.0
     antes = 0.0
 
-    # 2. BÚSQUEDA EXACTA EN VARIABLES (Inmune a traducciones)
+    # 2. BÚSQUEDA EN VARIABLES DE AMAZON
     if html_text:
         m_act = re.search(r'name="twister-plus-price-data-price" value="([\d\.]+)"', html_text)
         if m_act: actual = float(m_act.group(1))
@@ -126,33 +126,34 @@ def extraer_datos_francotirador(asin):
         m_ant = re.search(r'name="twister-plus-price-data-basisPrice" value="([\d\.]+)"', html_text)
         if m_ant: antes = float(m_ant.group(1))
 
-    # 3. BÚSQUEDA VISUAL EN LA CAJA DE COMPRA (Francotirador)
-    if actual == 0.0 and soup:
-        caja_precio = soup.select_one('#corePriceDisplay_desktop_feature_div, #corePrice_feature_div, #desktop_buybox, #price')
+    # 3. BÚSQUEDA VISUAL AGRESIVA EN CAJA DE COMPRA Y PRECIOS RECOMENDADOS
+    if soup:
+        caja_precio = soup.select_one('#corePriceDisplay_desktop_feature_div, #corePrice_feature_div, #desktop_buybox, #rightCol')
         if caja_precio:
-            # Precio Actual
-            el_actual = caja_precio.select_one('.priceToPay, .apexPriceToPay, .a-price')
-            if el_actual:
-                m1 = re.search(r'(\d+)[.,](\d{2})', el_actual.get_text(separator="", strip=True))
-                if m1: actual = float(f"{m1.group(1)}.{m1.group(2)}")
+            if actual == 0.0:
+                el_actual = caja_precio.select_one('.priceToPay, .apexPriceToPay, .a-price')
+                if el_actual:
+                    m1 = re.search(r'(\d+)[.,](\d{2})', el_actual.get_text(separator="", strip=True))
+                    if m1: actual = float(f"{m1.group(1)}.{m1.group(2)}")
             
-            # Precio Anterior (PVP)
             if antes == 0.0:
-                el_antes = caja_precio.select_one('.basisPrice, .a-text-strike, #listPrice')
+                # Buscamos clases amplias de precio tachado o recomendado
+                el_antes = caja_precio.select_one('.basisPrice, .a-text-strike, #listPrice, span[data-a-strike="true"]')
                 if el_antes:
                     m2 = re.search(r'(\d+)[.,](\d{2})', el_antes.get_text(separator="", strip=True))
                     if m2: antes = float(f"{m2.group(1)}.{m2.group(2)}")
 
-    # 4. REPESCA FRAGMENTADA (Si Google Translate rompe la estructura HTML)
-    if actual == 0.0 and soup:
-        entero = soup.select_one('.a-price-whole')
-        decimal = soup.select_one('.a-price-fraction')
-        if entero and decimal:
-            e = re.sub(r'\D', '', entero.get_text())
-            d = re.sub(r'\D', '', decimal.get_text())
-            if e and d: actual = float(f"{e}.{d}")
+    # 4. BÚSQUEDA GENERAL DE TEXTO TACHADO SI LA CAJA FALLA
+    if antes == 0.0 and soup:
+        textos_tachados = soup.select('.a-text-strike')
+        for t in textos_tachados:
+            m_t = re.search(r'(\d+)[.,](\d{2})', t.get_text())
+            if m_t:
+                val = float(f"{m_t.group(1)}.{m_t.group(2)}")
+                if val > actual:
+                    antes = val
+                    break
 
-    # Salvavidas para publicar sí o sí
     if actual == 0.0:
         actual = 1.00
 
@@ -161,7 +162,6 @@ def extraer_datos_francotirador(asin):
     if antes > 0 and actual > 0 and antes > actual:
         descuento = f"-{round((antes - actual) / antes * 100)}%"
 
-    # 6. PRIME
     es_prime = False
     if html_text:
         es_prime = bool(re.search(r'class="[^"]*a-icon-prime[^"]*"', html_text)) or bool(soup and soup.select_one('i.a-icon-prime'))
