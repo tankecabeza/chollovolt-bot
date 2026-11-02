@@ -9,7 +9,7 @@ from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright
 
 from auto_chollovolt import (
-    crear_imagen_chollo, parse_precio,
+    crear_imagen_chollo, 
     TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, X_STATE, publicar_en_x
 )
 
@@ -33,7 +33,7 @@ def expandir_enlace(url_corta):
     except Exception as e:
         return urllib.parse.unquote(str(e))
 
-def extraer_datos_amazon_definitivo(asin):
+def extraer_datos_amazon_universal(asin):
     url_proxy = f"https://www-amazon-es.translate.goog/dp/{asin}?_x_tr_sl=auto&_x_tr_tl=es&_x_tr_hl=es&_x_tr_pto=wapp"
     
     print(f"🔄 Descargando código fuente vía Google Proxy...")
@@ -56,43 +56,69 @@ def extraer_datos_amazon_definitivo(asin):
     else:
         titulo = titulo_el.get_text(strip=True)
         
-    # 2. PRECIOS (Estrategia de la Caja Central)
+    # 2. ESCÁNER DE PRECIOS UNIVERSAL (3 NIVELES)
     actual = None
     antes = None
     
-    # Buscamos en las grandes cajas de compra donde están los precios
-    caja_precio = soup.select_one('#corePriceDisplay_desktop_feature_div, #corePrice_feature_div, #desktop_buybox, #rightCol')
-    if caja_precio:
-        # Cogemos todos los textos legibles de precios ocultos a la vista general
-        offscreens = caja_precio.select('.a-price .a-offscreen')
-        valores = []
-        for off in offscreens:
-            # strip=True ignora las molestas etiquetas <font> inyectadas por Google
-            val = parse_precio(off.get_text(strip=True))
-            if val and val not in valores:
-                valores.append(val)
-                
-        if valores:
-            actual = min(valores)
-            if len(valores) > 1:
-                antes = max(valores)
-
-    # 3. Variables Ocultas (Por si la caja central no carga, muy típico en ropa/zapatillas)
+    # NIVEL 1: Variables nativas de Amazon (Inmunes a Google Translate)
+    patrones_actual = [
+        r'name="twister-plus-price-data-price" value="([\d\.]+)"',
+        r'"priceAmount":\s*([\d\.]+)',
+        r'"priceToPay"[^>]*"moneyValueOrPrice":"([\d\.]+)"',
+        r'data-asin-price="([\d\.]+)"'
+    ]
+    for pat in patrones_actual:
+        m = re.search(pat, html_text)
+        if m:
+            actual = float(m.group(1))
+            break
+            
+    # NIVEL 2: Búsqueda Agresiva en el DOM (Anulando basura de traducción)
     if not actual:
-        m_twister = re.search(r'name="twister-plus-price-data-price" value="([\d\.]+)"', html_text)
-        if m_twister: actual = float(m_twister.group(1))
-        
-        m_twister_basis = re.search(r'name="twister-plus-price-data-basisPrice" value="([\d\.]+)"', html_text)
-        if m_twister_basis: antes = float(m_twister_basis.group(1))
-
+        caja_precio = soup.select_one('#corePriceDisplay_desktop_feature_div, #corePrice_feature_div, #price, #desktop_buybox')
+        if caja_precio:
+            # Extraemos texto y borramos espacios/etiquetas para evitar el "45 , 99"
+            texto_caja = caja_precio.get_text(separator="", strip=True)
+            precios_encontrados = re.findall(r'(\d+)[.,](\d{2})€?', texto_caja)
+            if precios_encontrados:
+                valores = [float(f"{p[0]}.{p[1]}") for p in precios_encontrados]
+                actual = min(valores)
+                if len(valores) > 1:
+                    antes = max(valores)
+                    
+    # NIVEL 3: Números Fragmentados
     if not actual:
-        m_json = re.search(r'"priceAmount":\s*([\d\.]+)', html_text)
-        if m_json: actual = float(m_json.group(1))
-        
-    # SEGURO ANTI-CEROS (Para que nunca vuelva a salir "TOP 0,00€")
+        entero = soup.select_one('.a-price-whole')
+        decimal = soup.select_one('.a-price-fraction')
+        if entero and decimal:
+            e_val = re.sub(r'\D', '', entero.get_text())
+            d_val = re.sub(r'\D', '', decimal.get_text())
+            if e_val and d_val:
+                actual = float(f"{e_val}.{d_val}")
+
     if not actual or actual <= 0:
-        raise Exception("❌ No se pudo leer el precio exacto (Amazon requiere que el usuario elija talla/color manualmente). Abortando para no publicar a 0€.")
-        
+        raise Exception("❌ Imposible encontrar precio. Puede estar agotado, disponible solo de terceros, o ser un producto variable sin talla seleccionada.")
+
+    # 3. ESCÁNER DE PRECIO ANTERIOR (Si no se sacó en el Nivel 2)
+    if not antes:
+        patrones_antes = [
+            r'name="twister-plus-price-data-basisPrice" value="([\d\.]+)"',
+            r'"basisPrice"[^>]*"moneyValueOrPrice":"([\d\.]+)"'
+        ]
+        for pat in patrones_antes:
+            m = re.search(pat, html_text)
+            if m:
+                antes = float(m.group(1))
+                break
+                
+    if not antes:
+        caja_antes = soup.select_one('.a-text-strike, .basisPrice')
+        if caja_antes:
+            texto_antes = caja_antes.get_text(separator="", strip=True)
+            m_ant = re.search(r'(\d+)[.,](\d{2})', texto_antes)
+            if m_ant:
+                antes = float(f"{m_ant.group(1)}.{m_ant.group(2)}")
+
     # 4. IMAGEN
     img_url = None
     img_el = soup.select_one('#landingImage, #imgBlkFront')
@@ -138,7 +164,7 @@ async def main(url_acortada):
     print(f"✨ ASIN detectado ({asin}). Escaneando código interno...")
 
     try:
-        datos = extraer_datos_amazon_definitivo(asin)
+        datos = extraer_datos_amazon_universal(asin)
         print(f"✅ ¡Datos extraídos! Precio detectado: {datos['precio_actual']}€")
     except Exception as e:
         print(f"\n❌ FRACASO TOTAL: {e}")
