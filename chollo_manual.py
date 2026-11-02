@@ -44,10 +44,15 @@ def crear_imagen_definitiva(descuento, precio_actual_num, precio_antes_str, ruta
     bbox_desc = draw.textbbox((45, 50), descuento, font=f_gigante)
     x_precio = bbox_desc[2] + 40
 
-    partes = f"{precio_actual_num:.2f}".replace(".", ",").split(",")
-    draw.text((x_precio, 50), partes[0], font=f_gigante, fill=(15, 17, 17))
-    bbox_eur = draw.textbbox((x_precio, 50), partes[0], font=f_gigante)
-    draw.text((bbox_eur[2] + 6, 58), f"{partes[1]} €", font=f_super, fill=(15, 17, 17))
+    if precio_actual_num > 0:
+        partes = f"{precio_actual_num:.2f}".replace(".", ",").split(",")
+        euros = partes[0]
+        centimos = partes[1]
+        draw.text((x_precio, 50), euros, font=f_gigante, fill=(15, 17, 17))
+        bbox_eur = draw.textbbox((x_precio, 50), euros, font=f_gigante)
+        draw.text((bbox_eur[2] + 6, 58), f"{centimos} €", font=f_super, fill=(15, 17, 17))
+    else:
+        draw.text((x_precio, 50), "¡OFERTÓN!", font=f_gigante, fill=(15, 17, 17))
 
     if precio_antes_str:
         texto_antes = f"Precio recomendado: {precio_antes_str}€"
@@ -78,7 +83,7 @@ def expandir_enlace(url_corta):
     except Exception as e:
         return urllib.parse.unquote(str(e))
 
-def extraer_datos_autonomos(asin):
+def extraer_datos_francotirador(asin):
     url_directa = f"https://www.amazon.es/dp/{asin}"
     url_proxy = f"https://www-amazon-es.translate.goog/dp/{asin}?_x_tr_sl=auto&_x_tr_tl=es&_x_tr_hl=es&_x_tr_pto=wapp"
     ua_googlebot = "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
@@ -110,61 +115,63 @@ def extraer_datos_autonomos(asin):
             m_title = re.search(r'"title":\s*"([^"]+)"', html_text)
             if m_title: titulo = m_title.group(1)
 
-    # 2. PRECIO ACTUAL (La Magia)
     actual = 0.0
-    if html_text:
-        # Búsqueda tradicional en variables
-        for pat in [r'name="twister-plus-price-data-price" value="([\d\.]+)"', r'"priceAmount":\s*([\d\.]+)', r'data-asin-price="([\d\.]+)"']:
-            m = re.search(pat, html_text)
-            if m:
-                actual = float(m.group(1))
-                break
-        
-        # ESCÁNER CIEGO: Si no hay precio claro, barre todo el texto buscando el número más lógico
-        if actual == 0.0 and soup:
-            caja_central = soup.select_one('#centerCol, #rightCol, #desktop_buybox')
-            if caja_central:
-                texto_limpio = caja_central.get_text(separator=" ", strip=True)
-                # Busca cualquier formato tipo 55,99 o 55.99
-                precios_crudos = re.findall(r'(\d{1,4})[.,](\d{2})\b', texto_limpio)
-                if precios_crudos:
-                    # Filtra precios ilógicos (ej. 0.00 o más de 3000€) y saca el mínimo
-                    valores_validos = [float(f"{p[0]}.{p[1]}") for p in precios_crudos if 0 < float(f"{p[0]}.{p[1]}") < 3000]
-                    if valores_validos:
-                        actual = min(valores_validos)
-                        
-    # 3. PRECIO ANTERIOR
     antes = 0.0
-    if html_text:
-        for pat in [r'name="twister-plus-price-data-basisPrice" value="([\d\.]+)"', r'"basisPrice"[^>]*"moneyValueOrPrice":"([\d\.]+)"']:
-            m = re.search(pat, html_text)
-            if m:
-                antes = float(m.group(1))
-                break
-                
-        # Escáner ciego para precio anterior
-        if antes == 0.0 and soup:
-            caja_tachada = soup.select_one('.a-text-strike, .basisPrice')
-            if caja_tachada:
-                txt_antes = re.search(r'(\d{1,4})[.,](\d{2})\b', caja_tachada.get_text(separator="", strip=True))
-                if txt_antes:
-                    antes = float(f"{txt_antes.group(1)}.{txt_antes.group(2)}")
 
-    # Salvavidas final absoluto: Si incluso el escáner ciego falla, ponemos 1.00 para que publique
+    # 2. BÚSQUEDA EXACTA EN VARIABLES (Inmune a traducciones)
+    if html_text:
+        m_act = re.search(r'name="twister-plus-price-data-price" value="([\d\.]+)"', html_text)
+        if m_act: actual = float(m_act.group(1))
+        
+        m_ant = re.search(r'name="twister-plus-price-data-basisPrice" value="([\d\.]+)"', html_text)
+        if m_ant: antes = float(m_ant.group(1))
+
+    # 3. BÚSQUEDA VISUAL EN LA CAJA DE COMPRA (Francotirador)
+    if actual == 0.0 and soup:
+        caja_precio = soup.select_one('#corePriceDisplay_desktop_feature_div, #corePrice_feature_div, #desktop_buybox, #price')
+        if caja_precio:
+            # Precio Actual
+            el_actual = caja_precio.select_one('.priceToPay, .apexPriceToPay, .a-price')
+            if el_actual:
+                m1 = re.search(r'(\d+)[.,](\d{2})', el_actual.get_text(separator="", strip=True))
+                if m1: actual = float(f"{m1.group(1)}.{m1.group(2)}")
+            
+            # Precio Anterior (PVP)
+            if antes == 0.0:
+                el_antes = caja_precio.select_one('.basisPrice, .a-text-strike, #listPrice')
+                if el_antes:
+                    m2 = re.search(r'(\d+)[.,](\d{2})', el_antes.get_text(separator="", strip=True))
+                    if m2: antes = float(f"{m2.group(1)}.{m2.group(2)}")
+
+    # 4. REPESCA FRAGMENTADA (Si Google Translate rompe la estructura HTML)
+    if actual == 0.0 and soup:
+        entero = soup.select_one('.a-price-whole')
+        decimal = soup.select_one('.a-price-fraction')
+        if entero and decimal:
+            e = re.sub(r'\D', '', entero.get_text())
+            d = re.sub(r'\D', '', decimal.get_text())
+            if e and d: actual = float(f"{e}.{d}")
+
+    # Salvavidas para publicar sí o sí
     if actual == 0.0:
         actual = 1.00
 
-    # 4. DESCUENTO
+    # 5. DESCUENTO
     descuento = "TOP"
     if antes > 0 and actual > 0 and antes > actual:
         descuento = f"-{round((antes - actual) / antes * 100)}%"
+
+    # 6. PRIME
+    es_prime = False
+    if html_text:
+        es_prime = bool(re.search(r'class="[^"]*a-icon-prime[^"]*"', html_text)) or bool(soup and soup.select_one('i.a-icon-prime'))
 
     return {
         "titulo": titulo,
         "precio_actual_num": actual,
         "precio_antes_num": antes,
         "descuento": descuento,
-        "es_prime": bool(soup.select_one('i.a-icon-prime')) if soup else False
+        "es_prime": es_prime
     }
 
 def publicar_telegram(imagen_ruta, texto):
@@ -184,11 +191,15 @@ async def main(url_acortada):
         sys.exit(1)
         
     asin = m.group(1)
-    datos = extraer_datos_autonomos(asin)
+    datos = extraer_datos_francotirador(asin)
     
-    precio_txt = f"{datos['precio_actual_num']:.2f}".replace(".", ",")
-    txt_precio_x = f"💰 Ahora: {precio_txt}€"
-    txt_precio_tg = f"💰 <b>Precio actual:</b> {precio_txt}€"
+    if datos['precio_actual_num'] > 0 and datos['precio_actual_num'] != 1.00:
+        precio_txt = f"{datos['precio_actual_num']:.2f}".replace(".", ",")
+        txt_precio_x = f"💰 Ahora: {precio_txt}€"
+        txt_precio_tg = f"💰 <b>Precio actual:</b> {precio_txt}€"
+    else:
+        txt_precio_x = "💰 Precio: Consultar en Amazon"
+        txt_precio_tg = "💰 <b>Precio:</b> Consultar según modelo"
 
     if datos['precio_antes_num'] > 0 and datos['precio_actual_num'] > 0 and datos['precio_antes_num'] > datos['precio_actual_num']:
         precio_antes_txt = f"{datos['precio_antes_num']:.2f}".replace(".", ",")
