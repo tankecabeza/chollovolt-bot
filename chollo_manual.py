@@ -10,18 +10,14 @@ from auto_chollovolt import (
     JS_EXTRAER, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, X_STATE, publicar_en_x
 )
 
-# Arsenal de identidades falsas para saltar los bloqueos de Amazon
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3 Safari/605.1.15",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:122.0) Gecko/20100101 Firefox/122.0",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Edge/122.0.0.0"
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
 ]
 
 def expandir_enlace(url_corta):
-    """Sigue la redirección del enlace móvil para extraer la URL real web"""
     try:
         print(f"🔗 Resolviendo destino de: {url_corta}")
         headers = {"User-Agent": random.choice(USER_AGENTS), "Accept-Language": "es-ES,es;q=0.9"}
@@ -33,39 +29,56 @@ def expandir_enlace(url_corta):
         return url_corta
 
 async def extraer_datos_amazon_con_reintentos(url_scraping, browser):
-    """Bucle de reintentos con cambio de identidad si detecta CAPTCHA o bloqueo"""
     for intento in range(1, 6):
-        print(f"\n🔄 Intento {intento}/5: Entrando a Amazon con identidad encubierta...")
+        print(f"\n🔄 Intento {intento}/5: Entrando a Amazon con modo SIGILO activado...")
         
-        # Crear un contexto completamente nuevo en cada intento con un User-Agent distinto
         ua = random.choice(USER_AGENTS)
-        context = await browser.new_context(user_agent=ua, viewport={"width": 1920, "height": 1080})
+        context = await browser.new_context(
+            user_agent=ua,
+            viewport={"width": random.randint(1280, 1920), "height": random.randint(720, 1080)},
+            extra_http_headers={
+                "Accept-Language": "es-ES,es;q=0.9",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                "Sec-Ch-Ua-Mobile": "?0",
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": "none",
+            }
+        )
+        
+        # 💉 INYECCIÓN ANTIDETECCIÓN (La magia oscura)
+        await context.add_init_script("""
+            // Borra la etiqueta de "Soy un robot"
+            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+            // Finge tener Chrome instalado normalmente
+            window.chrome = { runtime: {} };
+            // Finge tener plugins instalados (los bots no suelen tenerlos)
+            Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
+            Object.defineProperty(navigator, 'languages', {get: () => ['es-ES', 'es', 'en']});
+        """)
+        
         page = await context.new_page()
         
         try:
             await page.goto(url_scraping, wait_until="domcontentloaded", timeout=25000)
             
-            # Detectar Captcha explícito
             if await page.locator("form[action*='validateCaptcha'], input#captchacharacters").count() > 0:
                 print("🛡️ ¡Muro de Amazon detectado! (CAPTCHA). Abortando este intento...")
                 await context.close()
-                await asyncio.sleep(random.uniform(1.5, 3.5))
+                await asyncio.sleep(random.uniform(2.0, 5.0))
                 continue
 
-            # Aceptar cookies si salen
             if await page.locator("#sp-cc-accept").count():
                 await page.locator("#sp-cc-accept").click(timeout=2000)
 
-            # Esperar a que el título aparezca
             try:
                 await page.wait_for_selector("#productTitle", timeout=8000)
             except Exception:
-                print("⏳ El producto no cargó a tiempo o la estructura es rara. Abortando este intento...")
+                print("⏳ El producto no cargó a tiempo. Abortando este intento...")
                 await context.close()
-                await asyncio.sleep(random.uniform(1.5, 3.5))
+                await asyncio.sleep(random.uniform(2.0, 5.0))
                 continue
 
-            # Si llegamos aquí, la página cargó bien. Extraemos los datos.
             d = await page.evaluate(JS_EXTRAER)
             if not d.get("titulo"):
                 raise Exception("El título existe pero vino vacío.")
@@ -94,9 +107,9 @@ async def extraer_datos_amazon_con_reintentos(url_scraping, browser):
         except Exception as e:
             print(f"⚠️ Fallo general en el intento {intento}: {str(e)[:50]}...")
             await context.close()
-            await asyncio.sleep(random.uniform(1.5, 3.5))
+            await asyncio.sleep(random.uniform(2.0, 5.0))
 
-    # Si tras 5 intentos falla, hacemos captura del último desastre
+    # Si todo falla
     context = await browser.new_context(user_agent=USER_AGENTS[0])
     page = await context.new_page()
     await page.goto(url_scraping, timeout=15000)
@@ -106,15 +119,10 @@ async def extraer_datos_amazon_con_reintentos(url_scraping, browser):
 
 def publicar_telegram_manual(imagen_ruta, texto):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        print("❌ Faltan credenciales de Telegram.")
         return False
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
     with open(imagen_ruta, "rb") as foto:
-        r = requests.post(
-            url,
-            data={"chat_id": TELEGRAM_CHAT_ID, "caption": texto, "parse_mode": "HTML"},
-            files={"photo": foto}
-        )
+        r = requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "caption": texto, "parse_mode": "HTML"}, files={"photo": foto})
     return r.status_code == 200
 
 async def main(url_acortada):
@@ -127,10 +135,17 @@ async def main(url_acortada):
         print(f"✨ ASIN detectado ({asin}). Usaremos URL limpia para raspar: {url_scraping}")
     else:
         url_scraping = url_real
-        print("⚠️ No se detectó ASIN puro, intentaremos raspar la URL redirigida.")
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
+        # Añadimos argumentos a Chromium para ocultar que es un bot
+        browser = await p.chromium.launch(
+            headless=True,
+            args=[
+                "--disable-blink-features=AutomationControlled", 
+                "--disable-infobars",
+                "--no-sandbox"
+            ]
+        )
         
         try:
             datos = await extraer_datos_amazon_con_reintentos(url_scraping, browser)
@@ -181,7 +196,6 @@ async def main(url_acortada):
             print("❌ Falló Telegram.")
         
         if X_STATE:
-            # Solo si vamos a publicar en X, creamos contexto y le pasamos cookies
             context_x = await browser.new_context(user_agent=USER_AGENTS[0])
             import json
             await context_x.add_cookies(json.loads(X_STATE).get("cookies", []))
