@@ -2,21 +2,29 @@ import asyncio
 import sys
 import html
 import re
+import random
 from playwright.async_api import async_playwright
 import requests
 from auto_chollovolt import (
     crear_imagen_chollo, parse_precio,
-    USER_AGENT, JS_EXTRAER, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, X_STATE, publicar_en_x
+    JS_EXTRAER, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, X_STATE, publicar_en_x
 )
+
+# Arsenal de identidades falsas para saltar los bloqueos de Amazon
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3 Safari/605.1.15",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:122.0) Gecko/20100101 Firefox/122.0",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Edge/122.0.0.0"
+]
 
 def expandir_enlace(url_corta):
     """Sigue la redirección del enlace móvil para extraer la URL real web"""
     try:
         print(f"🔗 Resolviendo destino de: {url_corta}")
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Accept-Language": "es-ES,es;q=0.9"
-        }
+        headers = {"User-Agent": random.choice(USER_AGENTS), "Accept-Language": "es-ES,es;q=0.9"}
         r = requests.get(url_corta, headers=headers, allow_redirects=True, timeout=15)
         print(f"📍 Redirigido a: {r.url}")
         return r.url
@@ -24,46 +32,77 @@ def expandir_enlace(url_corta):
         print(f"⚠️ Fallo al expandir enlace: {e}")
         return url_corta
 
-async def extraer_datos_amazon(url, page):
-    print(f"🌐 Cargando página de extracción: {url}")
-    await page.goto(url, wait_until="domcontentloaded", timeout=45000)
-    
-    try:
-        if await page.locator("#sp-cc-accept").count():
-            await page.locator("#sp-cc-accept").click(timeout=2000)
-    except Exception:
-        pass
+async def extraer_datos_amazon_con_reintentos(url_scraping, browser):
+    """Bucle de reintentos con cambio de identidad si detecta CAPTCHA o bloqueo"""
+    for intento in range(1, 6):
+        print(f"\n🔄 Intento {intento}/5: Entrando a Amazon con identidad encubierta...")
+        
+        # Crear un contexto completamente nuevo en cada intento con un User-Agent distinto
+        ua = random.choice(USER_AGENTS)
+        context = await browser.new_context(user_agent=ua, viewport={"width": 1920, "height": 1080})
+        page = await context.new_page()
+        
+        try:
+            await page.goto(url_scraping, wait_until="domcontentloaded", timeout=25000)
+            
+            # Detectar Captcha explícito
+            if await page.locator("form[action*='validateCaptcha'], input#captchacharacters").count() > 0:
+                print("🛡️ ¡Muro de Amazon detectado! (CAPTCHA). Abortando este intento...")
+                await context.close()
+                await asyncio.sleep(random.uniform(1.5, 3.5))
+                continue
 
-    try:
-        await page.wait_for_selector("#productTitle", timeout=15000)
-    except Exception:
-        await page.screenshot(path="error_manual.png")
-        raise Exception("No se encontró el título en 15s. Captura guardada como error_manual.png.")
+            # Aceptar cookies si salen
+            if await page.locator("#sp-cc-accept").count():
+                await page.locator("#sp-cc-accept").click(timeout=2000)
 
-    d = await page.evaluate(JS_EXTRAER)
-    
-    if not d.get("titulo"):
-        raise Exception("No se pudo extraer el título.")
+            # Esperar a que el título aparezca
+            try:
+                await page.wait_for_selector("#productTitle", timeout=8000)
+            except Exception:
+                print("⏳ El producto no cargó a tiempo o la estructura es rara. Abortando este intento...")
+                await context.close()
+                await asyncio.sleep(random.uniform(1.5, 3.5))
+                continue
 
-    actual = parse_precio(d.get("actual"))
-    antes = parse_precio(d.get("antes"))
+            # Si llegamos aquí, la página cargó bien. Extraemos los datos.
+            d = await page.evaluate(JS_EXTRAER)
+            if not d.get("titulo"):
+                raise Exception("El título existe pero vino vacío.")
 
-    if not actual:
-        raise Exception("No se pudo leer el precio actual.")
+            actual = parse_precio(d.get("actual"))
+            antes = parse_precio(d.get("antes"))
 
-    descuento_txt = "TOP"
-    if antes and antes > actual:
-        pct = round((antes - actual) / antes * 100)
-        descuento_txt = f"-{pct}%"
+            if not actual:
+                raise Exception("No se pudo leer el precio actual.")
 
-    return {
-        "titulo": d["titulo"],
-        "precio_actual": f"{actual:.2f}".replace(".", ","),
-        "precio_antes": f"{antes:.2f}".replace(".", ",") if antes else None,
-        "descuento": descuento_txt,
-        "es_prime": bool(d.get("prime")),
-        "imagen_original": d.get("imagen")
-    }
+            descuento_txt = "TOP"
+            if antes and antes > actual:
+                pct = round((antes - actual) / antes * 100)
+                descuento_txt = f"-{pct}%"
+
+            await context.close()
+            return {
+                "titulo": d["titulo"],
+                "precio_actual": f"{actual:.2f}".replace(".", ","),
+                "precio_antes": f"{antes:.2f}".replace(".", ",") if antes else None,
+                "descuento": descuento_txt,
+                "es_prime": bool(d.get("prime")),
+                "imagen_original": d.get("imagen")
+            }
+
+        except Exception as e:
+            print(f"⚠️ Fallo general en el intento {intento}: {str(e)[:50]}...")
+            await context.close()
+            await asyncio.sleep(random.uniform(1.5, 3.5))
+
+    # Si tras 5 intentos falla, hacemos captura del último desastre
+    context = await browser.new_context(user_agent=USER_AGENTS[0])
+    page = await context.new_page()
+    await page.goto(url_scraping, timeout=15000)
+    await page.screenshot(path="error_manual.png")
+    await context.close()
+    raise Exception("Imposible saltar el bloqueo de Amazon tras 5 intentos. Captura guardada.")
 
 def publicar_telegram_manual(imagen_ruta, texto):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
@@ -79,10 +118,8 @@ def publicar_telegram_manual(imagen_ruta, texto):
     return r.status_code == 200
 
 async def main(url_acortada):
-    # 1. Expandimos el enlace acortado para evitar bloqueos de la app móvil
     url_real = expandir_enlace(url_acortada)
     
-    # 2. Extraemos el ASIN (código de producto) limpio
     m = re.search(r"/(?:dp|gp/product)/([A-Z0-9]{10})", url_real)
     if m:
         asin = m.group(1)
@@ -94,17 +131,14 @@ async def main(url_acortada):
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context(user_agent=USER_AGENT, viewport={"width": 1280, "height": 800})
-        page = await context.new_page()
-
+        
         try:
-            datos = await extraer_datos_amazon(url_scraping, page)
+            datos = await extraer_datos_amazon_con_reintentos(url_scraping, browser)
         except Exception as e:
-            print(f"❌ Error extrayendo datos: {e}")
+            print(f"\n❌ FRACASO TOTAL: {e}")
             await browser.close()
             sys.exit(1)
         
-        # Textos
         cabecera = f"🔥 {datos['descuento']} de descuento 🔥" if "%" in datos['descuento'] else "⚡ ¡OFERTA DESTACADA! ⚡"
         txt_precio_x = f"💰 Ahora: {datos['precio_actual']}€"
         txt_precio_tg = f"💰 <b>Precio actual:</b> {datos['precio_actual']}€"
@@ -115,7 +149,6 @@ async def main(url_acortada):
 
         titulo_corto = datos['titulo'][:80].rstrip() + ("…" if len(datos['titulo']) > 80 else "")
         
-        # 3. PUBLICAMOS USANDO EL ENLACE ACORTADO ORIGINAL (url_acortada)
         texto_x = (
             f"{cabecera}\n"
             f"📦 {titulo_corto}\n\n"
@@ -148,9 +181,12 @@ async def main(url_acortada):
             print("❌ Falló Telegram.")
         
         if X_STATE:
+            # Solo si vamos a publicar en X, creamos contexto y le pasamos cookies
+            context_x = await browser.new_context(user_agent=USER_AGENTS[0])
             import json
-            await context.add_cookies(json.loads(X_STATE).get("cookies", []))
-            await publicar_en_x(context, texto_x, ruta_img)
+            await context_x.add_cookies(json.loads(X_STATE).get("cookies", []))
+            await publicar_en_x(context_x, texto_x, ruta_img)
+            await context_x.close()
             print("✅ Publicado con éxito en X.")
         
         await browser.close()
