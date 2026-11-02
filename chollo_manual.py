@@ -25,6 +25,9 @@ USER_AGENTS = [
 
 RE_PRECIO = r"(\d+(?:\.\d{3})*,\d{2})"
 
+# th=1&psc=1 le dice a Amazon que respete la variante (talla/color) del ASIN
+PARAMS_VARIANTE = "th=1&psc=1"
+
 
 # ==============================================================================
 # IMAGEN
@@ -44,7 +47,7 @@ def cargar_fuente(tamano, negrita=False):
 
 
 def crear_imagen_definitiva(descuento, precio_actual_num, precio_antes_str, ruta_salida, es_prime=False):
-    """descuento: texto tipo '-27%' o None si no se ha podido verificar."""
+    """descuento: texto tipo '-27%' o None si no hay descuento verificable."""
     W, H = 800, 440
     img = Image.new("RGB", (W, H), color=(255, 255, 255))
     draw = ImageDraw.Draw(img)
@@ -77,7 +80,7 @@ def crear_imagen_definitiva(descuento, precio_actual_num, precio_antes_str, ruta
         y_linea = (bbox_total[1] + bbox_total[3]) // 2 + 2
         draw.line([(bbox_sp[2], y_linea), (bbox_total[2], y_linea)], fill=(86, 89, 89), width=3)
     else:
-        draw.text((45, 230), "Oferta destacada en Amazon", font=f_gris, fill=(86, 89, 89))
+        draw.text((45, 230), "Producto destacado en Amazon", font=f_gris, fill=(86, 89, 89))
 
     if es_prime:
         draw.line([(48, 348), (62, 366), (92, 326)], fill=(255, 153, 0), width=9)
@@ -88,7 +91,7 @@ def crear_imagen_definitiva(descuento, precio_actual_num, precio_antes_str, ruta
 
 
 # ==============================================================================
-# ENLACE Y EXTRACCIÓN DE DATOS
+# ENLACE
 # ==============================================================================
 def expandir_enlace(url_corta):
     try:
@@ -98,15 +101,82 @@ def expandir_enlace(url_corta):
             allow_redirects=True,
             timeout=15,
         )
-        return urllib.parse.unquote(r.url.split("?")[0])
+        return urllib.parse.unquote(r.url)
     except Exception as e:
         print(f"⚠️ No pude expandir el enlace: {e}")
         return ""
 
 
+def num_usuario(txt):
+    """Convierte lo que escribe el usuario ('107,49', '107.49€', '1.299,99') en número."""
+    if not txt:
+        return None
+    t = re.sub(r"[^\d,.]", "", txt)
+    if not t:
+        return None
+    if "," in t and "." in t:
+        t = t.replace(".", "").replace(",", ".")
+    elif "," in t:
+        t = t.replace(",", ".")
+    try:
+        v = float(t)
+    except ValueError:
+        return None
+    return v if v > 0 else None
+
+
+# ==============================================================================
+# EXTRACCIÓN 1: NAVEGADOR REAL (la más fiable, ve el precio de TU variante)
+# ==============================================================================
+async def extraer_con_navegador(asin):
+    print("🧭 Leyendo la ficha con un navegador real...")
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True, args=["--no-sandbox"])
+        try:
+            ctx = await browser.new_context(user_agent=USER_AGENTS[0], locale="es-ES",
+                                            viewport={"width": 1280, "height": 800})
+            page = await ctx.new_page()
+            await page.goto(f"https://www.amazon.es/dp/{asin}?{PARAMS_VARIANTE}",
+                            wait_until="domcontentloaded", timeout=30000)
+            if await hay_captcha(page):
+                print("   🤖 Amazon pide captcha al navegador.")
+                return None
+            await page.wait_for_selector("#productTitle", timeout=8000)
+            await page.wait_for_timeout(1200)
+            return await page.evaluate(JS_EXTRAER)
+        except Exception as e:
+            print(f"   ⚠️ Navegador: {e}")
+            return None
+        finally:
+            await browser.close()
+
+
+def datos_desde_navegador(d):
+    badge = None
+    mb = re.search(r"(\d{1,2})\s*%", d.get("badge") or "")
+    if mb:
+        badge = int(mb.group(1))
+    actual = parse_precio(d.get("actual")) or 0.0
+    antes = parse_precio(d.get("antes")) or 0.0
+    if antes <= actual:
+        antes = 0.0
+    return {
+        "titulo": d.get("titulo"),
+        "precio_actual_num": actual,
+        "precio_antes_num": antes,
+        "badge_pct": badge,
+        "es_prime": bool(d.get("prime")),
+        "fuente": "navegador",
+    }
+
+
+# ==============================================================================
+# EXTRACCIÓN 2: HTML (plan B si el navegador falla)
+# ==============================================================================
 def _descargar_html(asin):
-    url_directa = f"https://www.amazon.es/dp/{asin}"
-    url_proxy = f"https://www-amazon-es.translate.goog/dp/{asin}?_x_tr_sl=auto&_x_tr_tl=es&_x_tr_hl=es&_x_tr_pto=wapp"
+    url_directa = f"https://www.amazon.es/dp/{asin}?{PARAMS_VARIANTE}"
+    url_proxy = (f"https://www-amazon-es.translate.goog/dp/{asin}?{PARAMS_VARIANTE}"
+                 f"&_x_tr_sl=auto&_x_tr_tl=es&_x_tr_hl=es&_x_tr_pto=wapp")
     ua_googlebot = "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
 
     try:
@@ -131,20 +201,14 @@ def _descargar_html(asin):
 
 def extraer_datos_html(asin):
     html_text = _descargar_html(asin)
-    datos = {
-        "titulo": None,
-        "precio_actual_num": 0.0,
-        "precio_antes_num": 0.0,
-        "badge_pct": None,
-        "es_prime": False,
-    }
+    datos = {"titulo": None, "precio_actual_num": 0.0, "precio_antes_num": 0.0,
+             "badge_pct": None, "es_prime": False, "fuente": "html"}
     if not html_text:
         return datos
 
     soup = BeautifulSoup(html_text, "html.parser")
     texto_plano = soup.get_text(" ", strip=True).replace("\xa0", " ")
 
-    # 1. Título
     el = soup.select_one("#productTitle")
     if el:
         datos["titulo"] = el.get_text(strip=True)
@@ -153,48 +217,37 @@ def extraer_datos_html(asin):
         if m:
             datos["titulo"] = m.group(1)
 
-    # 2. Variables ocultas de la página (no dependen del idioma)
-    m = re.search(r'name="twister-plus-price-data-price"[^>]*value="([\d.]+)"', html_text)
-    if m:
-        datos["precio_actual_num"] = float(m.group(1))
-    m = re.search(r'name="twister-plus-price-data-basisPrice"[^>]*value="([\d.]+)"', html_text)
-    if m:
-        datos["precio_antes_num"] = float(m.group(1))
-        print("   ✔ Precio anterior: variable oculta.")
+    # Solo miramos DENTRO de la caja de precio principal (no en las variantes)
+    caja = soup.select_one("#corePriceDisplay_desktop_feature_div, #corePrice_feature_div, #desktop_buybox")
 
-    # 3. Caja de compra: precio actual
-    caja = soup.select_one("#corePriceDisplay_desktop_feature_div, #corePrice_feature_div, #desktop_buybox, #price")
-    if datos["precio_actual_num"] == 0.0 and caja:
-        el_act = caja.select_one(".priceToPay, .apexPriceToPay, .a-price")
+    # Precio actual: primero el de la caja principal
+    if caja:
+        el_act = caja.select_one(".priceToPay .a-offscreen, .apexPriceToPay .a-offscreen, .priceToPay, .apexPriceToPay")
         if el_act:
             v = parse_precio(el_act.get_text(" ", strip=True))
             if v:
                 datos["precio_actual_num"] = v
-
-    # 4. Precio actual fragmentado
     if datos["precio_actual_num"] == 0.0:
-        ent, dec = soup.select_one(".a-price-whole"), soup.select_one(".a-price-fraction")
-        if ent and dec:
-            e, d = re.sub(r"\D", "", ent.get_text()), re.sub(r"\D", "", dec.get_text())
-            if e and d:
-                datos["precio_actual_num"] = float(f"{e}.{d}")
+        m = re.search(r'name="twister-plus-price-data-price"[^>]*value="([\d.]+)"', html_text)
+        if m:
+            datos["precio_actual_num"] = float(m.group(1))
 
-    # 5. Precio anterior (PVP) por selectores
-    if datos["precio_antes_num"] == 0.0:
-        for sel in (".basisPrice .a-offscreen",
-                    ".a-price.a-text-price .a-offscreen",
-                    "[data-a-strike='true'] .a-offscreen",
-                    "#listPrice", ".a-text-strike"):
-            for el in soup.select(sel):
-                v = parse_precio(el.get_text(" ", strip=True))
-                if v and v > datos["precio_actual_num"] > 0:
-                    datos["precio_antes_num"] = v
-                    print(f"   ✔ Precio anterior: selector {sel}.")
-                    break
-            if datos["precio_antes_num"]:
+    # Precio anterior (PVP)
+    ambito = caja if caja else soup
+    for sel in (".basisPrice .a-offscreen",
+                ".a-price.a-text-price .a-offscreen",
+                "[data-a-strike='true'] .a-offscreen"):
+        for el in ambito.select(sel):
+            v = parse_precio(el.get_text(" ", strip=True))
+            if v and v > datos["precio_actual_num"] > 0:
+                datos["precio_antes_num"] = v
                 break
-
-    # 6. Precio anterior por el texto "Precio recomendado: 89,95€"
+        if datos["precio_antes_num"]:
+            break
+    if datos["precio_antes_num"] == 0.0:
+        m = re.search(r'name="twister-plus-price-data-basisPrice"[^>]*value="([\d.]+)"', html_text)
+        if m and float(m.group(1)) > datos["precio_actual_num"] > 0:
+            datos["precio_antes_num"] = float(m.group(1))
     if datos["precio_antes_num"] == 0.0:
         m = re.search(
             r"(?:Precio recomendado|Precio de venta recomendado|Precio anterior|Precio de lista|PVP)\s*:?\s*" + RE_PRECIO,
@@ -203,73 +256,48 @@ def extraer_datos_html(asin):
             v = parse_precio(m.group(1))
             if v and v > datos["precio_actual_num"] > 0:
                 datos["precio_antes_num"] = v
-                print("   ✔ Precio anterior: texto 'Precio recomendado'.")
 
-    # 7. Etiqueta de descuento de Amazon (-27 %)
-    el_badge = soup.select_one(".savingsPercentage")
+    el_badge = (caja.select_one(".savingsPercentage") if caja else None) or soup.select_one(".savingsPercentage")
     if el_badge:
         mb = re.search(r"(\d{1,2})\s*%", el_badge.get_text())
         if mb:
             datos["badge_pct"] = int(mb.group(1))
 
-    # 8. Prime
     datos["es_prime"] = bool(re.search(r'class="[^"]*a-icon-prime[^"]*"', html_text)) or bool(soup.select_one("i.a-icon-prime"))
-
     return datos
 
 
-async def extraer_con_navegador(asin):
-    """Plan B: abre la ficha con un navegador real (renderiza el JavaScript)."""
-    print("🧭 Completando datos con un navegador real...")
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True, args=["--no-sandbox"])
-        try:
-            ctx = await browser.new_context(user_agent=USER_AGENTS[0], locale="es-ES",
-                                            viewport={"width": 1280, "height": 800})
-            page = await ctx.new_page()
-            await page.goto(f"https://www.amazon.es/dp/{asin}", wait_until="domcontentloaded", timeout=30000)
-            if await hay_captcha(page):
-                print("   🤖 Amazon pide captcha al navegador.")
-                return None
-            await page.wait_for_selector("#productTitle", timeout=8000)
-            return await page.evaluate(JS_EXTRAER)
-        except Exception as e:
-            print(f"   ⚠️ Navegador: {e}")
-            return None
-        finally:
-            await browser.close()
-
-
-def fusionar_navegador(datos, d):
-    if not d:
-        return
-    if not datos["titulo"] and d.get("titulo"):
-        datos["titulo"] = d["titulo"]
-    act, ant = parse_precio(d.get("actual")), parse_precio(d.get("antes"))
-    if datos["precio_actual_num"] <= 0 and act:
-        datos["precio_actual_num"] = act
-    if datos["precio_antes_num"] <= 0 and ant and ant > datos["precio_actual_num"] > 0:
-        datos["precio_antes_num"] = ant
-        print("   ✔ Precio anterior: navegador real.")
-    mb = re.search(r"(\d{1,2})\s*%", d.get("badge") or "")
-    if mb and not datos["badge_pct"]:
-        datos["badge_pct"] = int(mb.group(1))
-    if d.get("prime"):
-        datos["es_prime"] = True
-
-
+# ==============================================================================
+# VALIDACIÓN Y DESCUENTO
+# ==============================================================================
 def calcular_descuento(datos):
-    """Devuelve el descuento REAL como número entero, o None si no se puede verificar."""
+    """Descuento REAL (entero) o None."""
     act, ant, badge = datos["precio_actual_num"], datos["precio_antes_num"], datos["badge_pct"]
     if ant > act > 0:
         pct = round((ant - act) / ant * 100)
-        if badge and abs(badge - pct) > 3:
-            print(f"⚠️ El descuento calculado ({pct}%) no coincide con la etiqueta de Amazon ({badge}%).")
         return pct if 1 <= pct <= 95 else None
     if badge and 1 <= badge <= 95:
-        print("   ℹ️ Uso la etiqueta de descuento de Amazon (no se encontró el precio anterior).")
         return badge
     return None
+
+
+def comprobar_fiabilidad(datos):
+    """Devuelve (ok, motivo). Evita publicar un precio que no sea el de tu variante."""
+    act, ant, badge = datos["precio_actual_num"], datos["precio_antes_num"], datos["badge_pct"]
+
+    if act <= 0:
+        return False, "No se pudo leer el precio actual."
+    if datos["fuente"] == "manual":
+        return True, ""
+
+    if ant > act:
+        pct = round((ant - act) / ant * 100)
+        if badge and abs(badge - pct) > 3:
+            return False, (f"El descuento calculado ({pct}%) no coincide con la etiqueta de Amazon ({badge}%): "
+                           f"probablemente se ha leído el precio de otra variante.")
+    if datos["fuente"] == "html" and not badge:
+        return False, "Leído solo del HTML y sin etiqueta de descuento para contrastar."
+    return True, ""
 
 
 # ==============================================================================
@@ -304,41 +332,71 @@ async def main(url_acortada):
     asin = m.group(1)
     print(f"🔗 ASIN: {asin}")
 
-    datos = extraer_datos_html(asin)
+    # Precios opcionales escritos por ti (los que ves en la pantalla)
+    ov_act = num_usuario(os.getenv("PRECIO_ACTUAL", ""))
+    ov_ant = num_usuario(os.getenv("PRECIO_ANTES", ""))
 
-    # Si falta el precio actual o no hay forma de calcular el descuento, plan B
-    falta = datos["precio_actual_num"] <= 0 or (datos["precio_antes_num"] <= 0 and not datos["badge_pct"])
-    if falta:
-        fusionar_navegador(datos, await extraer_con_navegador(asin))
+    # 1) Navegador real; 2) HTML como plan B
+    d = await extraer_con_navegador(asin)
+    datos = datos_desde_navegador(d) if d and d.get("titulo") else None
+    if datos is None or datos["precio_actual_num"] <= 0:
+        h = extraer_datos_html(asin)
+        if datos and datos.get("titulo") and not h["titulo"]:
+            h["titulo"] = datos["titulo"]
+        datos = h
+
+    # 3) Tus precios mandan sobre cualquier lectura automática
+    if ov_act:
+        datos["precio_actual_num"] = ov_act
+        datos["fuente"] = "manual"
+        datos["badge_pct"] = None
+        if datos["precio_antes_num"] <= ov_act:
+            datos["precio_antes_num"] = 0.0
+    if ov_ant:
+        datos["precio_antes_num"] = ov_ant
+        datos["fuente"] = "manual"
+        datos["badge_pct"] = None
+    if datos["precio_antes_num"] and datos["precio_antes_num"] <= datos["precio_actual_num"]:
+        datos["precio_antes_num"] = 0.0
+
+    print(f"📊 Fuente={datos['fuente']} | Actual={datos['precio_actual_num']} | "
+          f"Antes={datos['precio_antes_num']} | Etiqueta={datos['badge_pct']}")
+
+    ok, motivo = comprobar_fiabilidad(datos)
+    if not ok:
+        print(f"::error::NO PUBLICO: {motivo}")
+        print("👉 Vuelve a lanzar el workflow escribiendo en los campos opcionales el "
+              "'Precio actual' y el 'Precio anterior' tal como los ves en la página de Amazon.")
+        sys.exit(2)
 
     pct = calcular_descuento(datos)
     descuento_txt = f"-{pct}%" if pct else None
-    print(f"📊 Actual={datos['precio_actual_num']} | Antes={datos['precio_antes_num']} | "
-          f"Etiqueta={datos['badge_pct']} | Descuento={descuento_txt}")
+    print(f"✅ Descuento: {descuento_txt}")
 
-    titulo = datos["titulo"] or "Oferta destacada en Amazon"
+    titulo = datos["titulo"] or "Producto destacado en Amazon"
     actual, antes = datos["precio_actual_num"], datos["precio_antes_num"]
     hay_antes = antes > actual > 0
-    precio_txt = f"{actual:.2f}".replace(".", ",") if actual > 0 else None
+    precio_txt = f"{actual:.2f}".replace(".", ",")
     antes_txt = f"{antes:.2f}".replace(".", ",") if hay_antes else None
 
     # ---- Texto de X ----
-    cab_x = f"🔥 {descuento_txt} de descuento 🔥" if descuento_txt else "🔥 ¡OFERTA DESTACADA! 🔥"
-    linea_x = f"💰 Ahora: {precio_txt}€" if precio_txt else "💰 Precio: consultar en Amazon"
+    cab_x = f"🔥 {descuento_txt} de descuento 🔥" if descuento_txt else "⭐ PRODUCTO DESTACADO ⭐"
+    linea_x = f"💰 Ahora: {precio_txt}€"
     if antes_txt:
         linea_x += f" (Antes: {antes_txt}€)"
     titulo_x = titulo[:80].rstrip() + ("…" if len(titulo) > 80 else "")
+    hashtags = "#chollo #ofertas #amazon #descuentos" if descuento_txt else "#amazon #recomendado"
     texto_x = (
         f"{cab_x}\n"
         f"📦 {titulo_x}\n\n"
         f"{linea_x}\n\n"
         f"🛒 {url_acortada}\n\n"
-        f"#chollo #ofertas #amazon #descuentos\n(Enlace de afiliado)"
+        f"{hashtags}\n(Enlace de afiliado)"
     )
 
     # ---- Texto de Telegram ----
-    cab_tg = f"🔥 <b>¡{html.escape(descuento_txt)} DE DESCUENTO!</b> 🔥" if descuento_txt else "🔥 <b>¡OFERTA DESTACADA!</b> 🔥"
-    linea_tg = f"💰 <b>Precio actual:</b> {precio_txt}€" if precio_txt else "💰 <b>Precio:</b> consultar en Amazon"
+    cab_tg = f"🔥 <b>¡{html.escape(descuento_txt)} DE DESCUENTO!</b> 🔥" if descuento_txt else "⭐ <b>PRODUCTO DESTACADO</b> ⭐"
+    linea_tg = f"💰 <b>Precio actual:</b> {precio_txt}€"
     if antes_txt:
         linea_tg += f" (PVP: <s>{antes_txt}€</s>)"
     titulo_tg = html.escape(titulo[:150]) + ("…" if len(titulo) > 150 else "")
@@ -347,7 +405,7 @@ async def main(url_acortada):
         f"📦 <b>Producto:</b> {titulo_tg}\n\n"
         f"{linea_tg}\n\n"
         f"🛒 <b>Ver oferta aquí:</b> {html.escape(url_acortada)}\n\n"
-        f"<i>#chollo #ofertas #amazon #descuentos</i>\n<i>(Enlace de afiliado)</i>"
+        f"<i>{html.escape(hashtags)}</i>\n<i>(Enlace de afiliado)</i>"
     )
 
     crear_imagen_definitiva(descuento_txt, actual, antes_txt, "chollo_manual.jpg", es_prime=datos["es_prime"])
