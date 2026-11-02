@@ -8,22 +8,46 @@ on:
         required: true
         type: string
 
+permissions:
+  contents: read
+
 jobs:
   publicar:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: pip
+
+      - name: Restaurar caché de Chromium
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-chromium-${{ hashFiles('requirements.txt') }}-v1
+
       - name: Instalar dependencias
         run: |
           pip install -r requirements.txt
           playwright install --with-deps chromium
+
       - name: Publicar chollo manual
         env:
           X_STATE: ${{ secrets.X_STATE }}
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python chollo_manual.py "${{ github.event.inputs.url_amazon }}"
+          URL_AMAZON: ${{ github.event.inputs.url_amazon }}
+        run: python chollo_manual.py "$URL_AMAZON"
+
+      - name: Subir captura si existe
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: error-captura-manual
+          path: error.png
+          if-no-files-found: ignore
+          retention-days: 7
