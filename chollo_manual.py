@@ -3,27 +3,32 @@ import sys
 import html
 from playwright.async_api import async_playwright
 import requests
-# Importamos la lógica de imagen y configuración de tu script principal
 from auto_chollovolt import (
     crear_imagen_chollo, parse_precio,
     USER_AGENT, JS_EXTRAER, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, X_STATE, publicar_en_x
 )
 
 async def extraer_datos_amazon(url, page):
-    # Entra a tu enlace acortado y deja que Amazon lo redirija al producto real
-    await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+    await page.goto(url, wait_until="domcontentloaded", timeout=45000)
     
     try:
         if await page.locator("#sp-cc-accept").count():
-            await page.locator("#sp-cc-accept").click(timeout=1500)
+            await page.locator("#sp-cc-accept").click(timeout=2000)
     except Exception:
         pass
 
-    await page.wait_for_selector("#productTitle", timeout=8000)
+    try:
+        # Aumentamos el tiempo a 15 segundos por si el acortador tarda en redirigir
+        await page.wait_for_selector("#productTitle", timeout=15000)
+    except Exception:
+        # Si falla, saca una foto para que podamos ver qué pantalla cargó Amazon
+        await page.screenshot(path="error_manual.png")
+        raise Exception("No se encontró el título en 15s. Captura guardada como error_manual.png.")
+
     d = await page.evaluate(JS_EXTRAER)
     
     if not d.get("titulo"):
-        raise Exception("No se pudo extraer el título de la página.")
+        raise Exception("No se pudo extraer el título.")
 
     actual = parse_precio(d.get("actual"))
     antes = parse_precio(d.get("antes"))
@@ -70,13 +75,9 @@ async def main(url_acortada):
         except Exception as e:
             print(f"❌ Error extrayendo datos: {e}")
             await browser.close()
-            return
+            sys.exit(1) # Forza el fallo en GitHub para que no salga en verde
         
-        # ---------------------------------------------------------
-        # GENERACIÓN DE TEXTOS Y FORMATO
-        # ---------------------------------------------------------
         cabecera = f"🔥 {datos['descuento']} de descuento 🔥" if "%" in datos['descuento'] else "⚡ ¡OFERTA DESTACADA! ⚡"
-        
         txt_precio_x = f"💰 Ahora: {datos['precio_actual']}€"
         txt_precio_tg = f"💰 <b>Precio actual:</b> {datos['precio_actual']}€"
         
@@ -84,30 +85,23 @@ async def main(url_acortada):
             txt_precio_x += f" (Antes: {datos['precio_antes']}€)"
             txt_precio_tg += f" (Precio anterior: <s>{datos['precio_antes']}€</s>)"
 
-        # Formato X (Twitter)
         titulo_corto = datos['titulo'][:80].rstrip() + ("…" if len(datos['titulo']) > 80 else "")
         texto_x = (
             f"{cabecera}\n"
             f"📦 {titulo_corto}\n\n"
             f"{txt_precio_x}\n\n"
             f"🛒 {url_acortada}\n\n"
-            f"#chollo #ofertas #amazon #descuentos\n"
-            f"(Enlace de afiliado)"
+            f"#chollo #ofertas #amazon #descuentos\n(Enlace de afiliado)"
         )
 
-        # Formato Telegram
         texto_tg = (
             f"{cabecera}\n\n"
             f"📦 <b>Producto:</b> {html.escape(datos['titulo'][:150])}...\n\n"
             f"{txt_precio_tg}\n\n"
             f"🛒 <b>Ver oferta aquí:</b> {html.escape(url_acortada)}\n\n"
-            f"<i>#chollo #ofertas #amazon #descuentos</i>\n"
-            f"<i>(Enlace de afiliado)</i>"
+            f"<i>#chollo #ofertas #amazon #descuentos</i>\n<i>(Enlace de afiliado)</i>"
         )
 
-        # ---------------------------------------------------------
-        # GENERACIÓN DE IMAGEN
-        # ---------------------------------------------------------
         ruta_img = "chollo_manual.jpg"
         crear_imagen_chollo(
             datos['descuento'], datos['precio_actual'], datos['precio_antes'],
@@ -118,9 +112,6 @@ async def main(url_acortada):
         print(texto_x)
         print("-" * 40)
 
-        # ---------------------------------------------------------
-        # PUBLICACIÓN
-        # ---------------------------------------------------------
         if publicar_telegram_manual(ruta_img, texto_tg):
             print("✅ Publicado con éxito en Telegram.")
         else:
