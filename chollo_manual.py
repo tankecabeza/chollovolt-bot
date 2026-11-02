@@ -1,6 +1,7 @@
 import asyncio
 import sys
 import html
+import re
 from playwright.async_api import async_playwright
 import requests
 from auto_chollovolt import (
@@ -8,7 +9,23 @@ from auto_chollovolt import (
     USER_AGENT, JS_EXTRAER, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, X_STATE, publicar_en_x
 )
 
+def expandir_enlace(url_corta):
+    """Sigue la redirección del enlace móvil para extraer la URL real web"""
+    try:
+        print(f"🔗 Resolviendo destino de: {url_corta}")
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept-Language": "es-ES,es;q=0.9"
+        }
+        r = requests.get(url_corta, headers=headers, allow_redirects=True, timeout=15)
+        print(f"📍 Redirigido a: {r.url}")
+        return r.url
+    except Exception as e:
+        print(f"⚠️ Fallo al expandir enlace: {e}")
+        return url_corta
+
 async def extraer_datos_amazon(url, page):
+    print(f"🌐 Cargando página de extracción: {url}")
     await page.goto(url, wait_until="domcontentloaded", timeout=45000)
     
     try:
@@ -18,10 +35,8 @@ async def extraer_datos_amazon(url, page):
         pass
 
     try:
-        # Aumentamos el tiempo a 15 segundos por si el acortador tarda en redirigir
         await page.wait_for_selector("#productTitle", timeout=15000)
     except Exception:
-        # Si falla, saca una foto para que podamos ver qué pantalla cargó Amazon
         await page.screenshot(path="error_manual.png")
         raise Exception("No se encontró el título en 15s. Captura guardada como error_manual.png.")
 
@@ -64,19 +79,32 @@ def publicar_telegram_manual(imagen_ruta, texto):
     return r.status_code == 200
 
 async def main(url_acortada):
+    # 1. Expandimos el enlace acortado para evitar bloqueos de la app móvil
+    url_real = expandir_enlace(url_acortada)
+    
+    # 2. Extraemos el ASIN (código de producto) limpio
+    m = re.search(r"/(?:dp|gp/product)/([A-Z0-9]{10})", url_real)
+    if m:
+        asin = m.group(1)
+        url_scraping = f"https://www.amazon.es/dp/{asin}"
+        print(f"✨ ASIN detectado ({asin}). Usaremos URL limpia para raspar: {url_scraping}")
+    else:
+        url_scraping = url_real
+        print("⚠️ No se detectó ASIN puro, intentaremos raspar la URL redirigida.")
+
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context(user_agent=USER_AGENT, viewport={"width": 1280, "height": 800})
         page = await context.new_page()
 
-        print(f"🔍 Analizando tu enlace: {url_acortada}")
         try:
-            datos = await extraer_datos_amazon(url_acortada, page)
+            datos = await extraer_datos_amazon(url_scraping, page)
         except Exception as e:
             print(f"❌ Error extrayendo datos: {e}")
             await browser.close()
-            sys.exit(1) # Forza el fallo en GitHub para que no salga en verde
+            sys.exit(1)
         
+        # Textos
         cabecera = f"🔥 {datos['descuento']} de descuento 🔥" if "%" in datos['descuento'] else "⚡ ¡OFERTA DESTACADA! ⚡"
         txt_precio_x = f"💰 Ahora: {datos['precio_actual']}€"
         txt_precio_tg = f"💰 <b>Precio actual:</b> {datos['precio_actual']}€"
@@ -86,6 +114,8 @@ async def main(url_acortada):
             txt_precio_tg += f" (Precio anterior: <s>{datos['precio_antes']}€</s>)"
 
         titulo_corto = datos['titulo'][:80].rstrip() + ("…" if len(datos['titulo']) > 80 else "")
+        
+        # 3. PUBLICAMOS USANDO EL ENLACE ACORTADO ORIGINAL (url_acortada)
         texto_x = (
             f"{cabecera}\n"
             f"📦 {titulo_corto}\n\n"
