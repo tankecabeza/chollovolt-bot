@@ -4,22 +4,28 @@ on:
   workflow_dispatch:
     inputs:
       url_amazon:
-        description: 'Pega aquí el enlace del chollo de Amazon'
+        description: 'Pega aquí TU ENLACE ACORTADO de afiliado (amzn.to/...)'
         required: true
+        type: string
 
 jobs:
   publicar:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      
       - uses: actions/setup-python@v5
-        with: { python-version: '3.11' }
-      - run: |
+        with:
+          python-version: '3.11'
+          cache: pip
+          
+      - name: Instalar dependencias
+        run: |
           pip install -r requirements.txt
           playwright install --with-deps chromium
-      - name: Publicar chollo manual
+          
+      - name: Publicar chollo con enlace propio
         env:
-          AMAZON_TAG: ${{ secrets.AMAZON_TAG }}
           X_STATE: ${{ secrets.X_STATE }}
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
