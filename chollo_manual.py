@@ -1,22 +1,18 @@
 import asyncio
 import sys
-import re
 import html
 from playwright.async_api import async_playwright
 import requests
-# Reutilizamos funciones de tu script principal
+# Importamos la lógica de imagen y configuración de tu script principal
 from auto_chollovolt import (
-    crear_imagen_chollo, parse_precio, generar_enlace_afiliado, 
+    crear_imagen_chollo, parse_precio,
     USER_AGENT, JS_EXTRAER, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, X_STATE, publicar_en_x
 )
 
 async def extraer_datos_amazon(url, page):
+    # Entra a tu enlace acortado y deja que Amazon lo redirija al producto real
     await page.goto(url, wait_until="domcontentloaded", timeout=30000)
     
-    # Extraer ASIN de la URL
-    asin_match = re.search(r"/(?:dp|gp/product)/([A-Z0-9]{10})", url)
-    asin = asin_match.group(1) if asin_match else "DESCONOCIDO"
-
     try:
         if await page.locator("#sp-cc-accept").count():
             await page.locator("#sp-cc-accept").click(timeout=1500)
@@ -27,7 +23,7 @@ async def extraer_datos_amazon(url, page):
     d = await page.evaluate(JS_EXTRAER)
     
     if not d.get("titulo"):
-        raise Exception("No se pudo extraer el título.")
+        raise Exception("No se pudo extraer el título de la página.")
 
     actual = parse_precio(d.get("actual"))
     antes = parse_precio(d.get("antes"))
@@ -41,7 +37,6 @@ async def extraer_datos_amazon(url, page):
         descuento_txt = f"-{pct}%"
 
     return {
-        "asin": asin,
         "titulo": d["titulo"],
         "precio_actual": f"{actual:.2f}".replace(".", ","),
         "precio_antes": f"{antes:.2f}".replace(".", ",") if antes else None,
@@ -63,74 +58,84 @@ def publicar_telegram_manual(imagen_ruta, texto):
         )
     return r.status_code == 200
 
-async def main(url_chollo):
+async def main(url_acortada):
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context(user_agent=USER_AGENT, viewport={"width": 1280, "height": 800})
         page = await context.new_page()
 
-        print(f"🔍 Analizando chollo: {url_chollo}")
+        print(f"🔍 Analizando tu enlace: {url_acortada}")
         try:
-            datos = await extraer_datos_amazon(url_chollo, page)
+            datos = await extraer_datos_amazon(url_acortada, page)
         except Exception as e:
-            print(f"❌ Error al raspar: {e}")
+            print(f"❌ Error extrayendo datos: {e}")
             await browser.close()
             return
-
-        enlace_afiliado = generar_enlace_afiliado(datos["asin"])
         
-        # Generar Textos
+        # ---------------------------------------------------------
+        # GENERACIÓN DE TEXTOS Y FORMATO
+        # ---------------------------------------------------------
         cabecera = f"🔥 {datos['descuento']} de descuento 🔥" if "%" in datos['descuento'] else "⚡ ¡OFERTA DESTACADA! ⚡"
         
         txt_precio_x = f"💰 Ahora: {datos['precio_actual']}€"
-        txt_precio_tg = f"💰 <b>Precio:</b> {datos['precio_actual']}€"
+        txt_precio_tg = f"💰 <b>Precio actual:</b> {datos['precio_actual']}€"
+        
         if datos['precio_antes']:
             txt_precio_x += f" (Antes: {datos['precio_antes']}€)"
-            txt_precio_tg += f" (PVP: <s>{datos['precio_antes']}€</s>)"
+            txt_precio_tg += f" (Precio anterior: <s>{datos['precio_antes']}€</s>)"
 
-        titulo_corto = datos['titulo'][:70].rstrip() + ("…" if len(datos['titulo']) > 70 else "")
-
+        # Formato X (Twitter)
+        titulo_corto = datos['titulo'][:80].rstrip() + ("…" if len(datos['titulo']) > 80 else "")
         texto_x = (
             f"{cabecera}\n"
-            f"📦 {titulo_corto}\n"
-            f"{txt_precio_x}\n"
-            f"🛒 {enlace_afiliado}\n\n"
-            f"#chollos #amazon #ofertas\n(Enlace de afiliado)"
+            f"📦 {titulo_corto}\n\n"
+            f"{txt_precio_x}\n\n"
+            f"🛒 {url_acortada}\n\n"
+            f"#chollo #ofertas #amazon #descuentos\n"
+            f"(Enlace de afiliado)"
         )
 
+        # Formato Telegram
         texto_tg = (
             f"{cabecera}\n\n"
-            f"📦 <b>Producto:</b> {html.escape(datos['titulo'][:180])}\n\n"
+            f"📦 <b>Producto:</b> {html.escape(datos['titulo'][:150])}...\n\n"
             f"{txt_precio_tg}\n\n"
-            f"🛒 <b>Comprar aquí:</b> {html.escape(enlace_afiliado)}\n\n"
-            f"<i>Como afiliado de Amazon, obtengo ingresos por compras adscritas.</i>"
+            f"🛒 <b>Ver oferta aquí:</b> {html.escape(url_acortada)}\n\n"
+            f"<i>#chollo #ofertas #amazon #descuentos</i>\n"
+            f"<i>(Enlace de afiliado)</i>"
         )
 
-        # Generar Imagen
+        # ---------------------------------------------------------
+        # GENERACIÓN DE IMAGEN
+        # ---------------------------------------------------------
         ruta_img = "chollo_manual.jpg"
         crear_imagen_chollo(
             datos['descuento'], datos['precio_actual'], datos['precio_antes'],
             ruta_img, es_prime=datos['es_prime']
         )
 
-        print("\n📝 TEXTO GENERADO:")
+        print("\n📝 TEXTO GENERADO PARA X:")
         print(texto_x)
         print("-" * 40)
 
-        # Publicar
-        publicar_telegram_manual(ruta_img, texto_tg)
-        print("✅ Enviado a Telegram.")
-
+        # ---------------------------------------------------------
+        # PUBLICACIÓN
+        # ---------------------------------------------------------
+        if publicar_telegram_manual(ruta_img, texto_tg):
+            print("✅ Publicado con éxito en Telegram.")
+        else:
+            print("❌ Falló Telegram.")
+        
         if X_STATE:
             import json
             await context.add_cookies(json.loads(X_STATE).get("cookies", []))
             await publicar_en_x(context, texto_x, ruta_img)
-            print("✅ Enviado a X.")
-
+            print("✅ Publicado con éxito en X.")
+        
         await browser.close()
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Uso: python chollo_manual.py <URL_DE_AMAZON>")
+        print("Uso: python chollo_manual.py <URL_ACORTADA>")
         sys.exit(1)
     asyncio.run(main(sys.argv[1]))
