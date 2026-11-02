@@ -324,6 +324,12 @@ def publicar_telegram(imagen_ruta, texto):
 # PRINCIPAL
 # ==============================================================================
 async def main(url_acortada):
+    # Si llega texto de "Compartir" (frase + enlace), nos quedamos solo con la primera URL
+    m_url = re.search(r"https?://[^\s\"'<>]+", url_acortada)
+    if m_url:
+        url_acortada = m_url.group(0)
+    print(f"🔗 Enlace recibido: {url_acortada}")
+
     url_real = expandir_enlace(url_acortada)
     m = re.search(r"(?:/dp/|/gp/product/|%2Fdp%2F|%2Fproduct%2F)([A-Z0-9]{10})", url_real)
     if not m:
