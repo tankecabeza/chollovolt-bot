@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       url_amazon:
-        description: 'Pega aquí TU ENLACE ACORTADO de afiliado (amzn.to/...)'
+        description: 'Pega aquí TU ENLACE ACORTADO de afiliado (ej: amzn.to/...)'
         required: true
         type: string
 
@@ -30,3 +30,11 @@ jobs:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python chollo_manual.py "${{ github.event.inputs.url_amazon }}"
+        
+      - name: Subir captura si falla
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: error-captura-manual
+          path: error_manual.png
+          if-no-files-found: ignore
