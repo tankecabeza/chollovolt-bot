@@ -7,6 +7,16 @@ on:
         description: 'Pega aquí el ENLACE ACORTADO (Ej: amzn.to/... o link.amazon/...)'
         required: true
         type: string
+      precio_actual:
+        description: '(Opcional) Precio actual tal como lo ves en Amazon. Ej: 107,49'
+        required: false
+        default: ''
+        type: string
+      precio_antes:
+        description: '(Opcional) Precio recomendado / PVP tachado. Ej: 189,95'
+        required: false
+        default: ''
+        type: string
 
 permissions:
   contents: read
@@ -41,6 +51,8 @@ jobs:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           URL_AMAZON: ${{ github.event.inputs.url_amazon }}
+          PRECIO_ACTUAL: ${{ github.event.inputs.precio_actual }}
+          PRECIO_ANTES: ${{ github.event.inputs.precio_antes }}
         run: python chollo_manual.py "$URL_AMAZON"
 
       - name: Subir captura si existe
