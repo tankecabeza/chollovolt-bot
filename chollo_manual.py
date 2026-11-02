@@ -2,6 +2,7 @@ import asyncio
 import sys
 import html
 import re
+import urllib.parse
 from playwright.async_api import async_playwright
 import requests
 
@@ -13,22 +14,22 @@ from auto_chollovolt import (
 def expandir_enlace(url_corta):
     try:
         print(f"🔗 Resolviendo destino de: {url_corta}")
-        # Resolvemos a dónde apunta el enlace corto simulando ser un móvil real
         r = requests.get(
             url_corta, 
-            headers={"User-Agent": "Mozilla/5.0 (Linux; Android 13; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Mobile Safari/537.36"}, 
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"}, 
             allow_redirects=True, 
             timeout=15
         )
         print(f"📍 Redirigido a: {r.url.split('?')[0]}")
-        return r.url
+        return urllib.parse.unquote(r.url)
     except Exception as e:
-        print(f"⚠️ Fallo al expandir enlace: {e}")
-        return url_corta
+        # Aquí cazamos el error de "intent://" (redirección a la App de Amazon)
+        error_str = urllib.parse.unquote(str(e))
+        print(f"📍 Redirección a App Móvil detectada. Extrayendo ASIN del enlace interno...")
+        # Devolvemos el string del error porque ahí dentro va escondido el enlace "intent://.../dp/ASIN..."
+        return error_str 
 
 async def extraer_datos_amazon_troya(asin, browser):
-    # EL CABALLO DE TROYA: Usamos el dominio fantasma de Google Translate.
-    # Amazon JAMÁS bloquea estas peticiones porque confía ciegamente en las IPs de Google.
     url_proxy_google = f"https://www-amazon-es.translate.goog/dp/{asin}?_x_tr_sl=auto&_x_tr_tl=es&_x_tr_hl=es&_x_tr_pto=wapp"
     url_directa = f"https://www.amazon.es/dp/{asin}"
     
@@ -47,14 +48,11 @@ async def extraer_datos_amazon_troya(asin, browser):
         page = await context.new_page()
         
         try:
-            # Vamos a la página y damos margen para que Google cargue la estructura
             await page.goto(url_scraping, wait_until="domcontentloaded", timeout=30000)
             
-            # Quitar cookies si aparecen en el proxy
             if await page.locator("#sp-cc-accept").count():
                 await page.locator("#sp-cc-accept").click(timeout=2000)
 
-            # Esperamos a que Google renderice el título de Amazon
             try:
                 await page.wait_for_selector("#productTitle", timeout=12000)
             except Exception:
@@ -63,7 +61,6 @@ async def extraer_datos_amazon_troya(asin, browser):
                 await context.close()
                 continue
 
-            # Inyectamos el bisturí JavaScript para sacar los precios
             d = await page.evaluate(JS_EXTRAER)
             
             if not d.get("titulo"):
@@ -107,7 +104,8 @@ def publicar_telegram_manual(imagen_ruta, texto):
 async def main(url_acortada):
     url_real = expandir_enlace(url_acortada)
     
-    m = re.search(r"/(?:dp|gp/product)/([A-Z0-9]{10})", url_real)
+    # Expresión regular mejorada para atrapar el ASIN incluso si está metido en texto sucio de un error "intent://"
+    m = re.search(r"(?:/dp/|/gp/product/|%2Fdp%2F|%2Fproduct%2F)([A-Z0-9]{10})", url_real)
     if not m:
         print("❌ No se detectó un ASIN válido en el enlace.")
         sys.exit(1)
@@ -126,9 +124,6 @@ async def main(url_acortada):
             await browser.close()
             sys.exit(1)
         
-        # ---------------------------------------------------------
-        # COMPOSICIÓN DEL MENSAJE (RESPETANDO TU ENLACE ACORTADO)
-        # ---------------------------------------------------------
         cabecera = f"🔥 {datos['descuento']} de descuento 🔥" if "%" in datos['descuento'] else "⚡ ¡OFERTA DESTACADA! ⚡"
         txt_precio_x = f"💰 Ahora: {datos['precio_actual']}€"
         txt_precio_tg = f"💰 <b>Precio actual:</b> {datos['precio_actual']}€"
@@ -165,9 +160,6 @@ async def main(url_acortada):
         print(texto_x)
         print("-" * 40)
 
-        # ---------------------------------------------------------
-        # PUBLICACIÓN FINAL
-        # ---------------------------------------------------------
         if publicar_telegram_manual(ruta_img, texto_tg):
             print("✅ Telegram: Publicado con éxito.")
         else:
