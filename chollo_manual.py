@@ -34,7 +34,6 @@ def expandir_enlace(url_corta):
         return urllib.parse.unquote(str(e))
 
 def extraer_datos_amazon_definitivo(asin):
-    # Usamos el proxy de Google Translate para bajar el HTML crudo y burlar la IP
     url_proxy = f"https://www-amazon-es.translate.goog/dp/{asin}?_x_tr_sl=auto&_x_tr_tl=es&_x_tr_hl=es&_x_tr_pto=wapp"
     
     print(f"🔄 Descargando código fuente vía Google Proxy...")
@@ -49,7 +48,6 @@ def extraer_datos_amazon_definitivo(asin):
     # 1. TÍTULO
     titulo_el = soup.select_one("#productTitle")
     if not titulo_el:
-        # Búsqueda en metadatos si falla el DOM
         m_title = re.search(r'"title":\s*"([^"]+)"', html_text)
         if m_title: 
             titulo = m_title.group(1)
@@ -58,39 +56,43 @@ def extraer_datos_amazon_definitivo(asin):
     else:
         titulo = titulo_el.get_text(strip=True)
         
-    # 2. PRECIO ACTUAL
+    # 2. PRECIOS (Estrategia de la Caja Central)
     actual = None
-    
-    # Búsqueda clásica
-    selectores = ['.priceToPay .a-offscreen', '#priceblock_ourprice', '#priceblock_dealprice', '.apexPriceToPay .a-offscreen', '.a-price .a-offscreen']
-    for sel in selectores:
-        for el in soup.select(sel):
-            val = parse_precio(el.get_text(strip=True))
-            if val:
-                actual = val
-                break
-        if actual: break
-        
-    # Búsqueda quirúrgica en variables de Javascript (Ideal para ropa y zapatos)
-    if not actual:
-        m = re.search(r'"priceAmount":\s*([\d\.]+)', html_text)
-        if m: actual = float(m.group(1))
-        
-    if not actual:
-        print("⚠️ No se detectó precio (requiere elegir talla/variación). Usando precio genérico.")
-        actual = 0.00
-        
-    # 3. PRECIO ANTERIOR
     antes = None
-    selectores_antes = ['.basisPrice .a-offscreen', '[data-a-strike="true"] .a-offscreen', '#listPrice']
-    for sel in selectores_antes:
-        for el in soup.select(sel):
-            val = parse_precio(el.get_text(strip=True))
-            if val:
-                antes = val
-                break
-        if antes: break
+    
+    # Buscamos en las grandes cajas de compra donde están los precios
+    caja_precio = soup.select_one('#corePriceDisplay_desktop_feature_div, #corePrice_feature_div, #desktop_buybox, #rightCol')
+    if caja_precio:
+        # Cogemos todos los textos legibles de precios ocultos a la vista general
+        offscreens = caja_precio.select('.a-price .a-offscreen')
+        valores = []
+        for off in offscreens:
+            # strip=True ignora las molestas etiquetas <font> inyectadas por Google
+            val = parse_precio(off.get_text(strip=True))
+            if val and val not in valores:
+                valores.append(val)
+                
+        if valores:
+            actual = min(valores)
+            if len(valores) > 1:
+                antes = max(valores)
 
+    # 3. Variables Ocultas (Por si la caja central no carga, muy típico en ropa/zapatillas)
+    if not actual:
+        m_twister = re.search(r'name="twister-plus-price-data-price" value="([\d\.]+)"', html_text)
+        if m_twister: actual = float(m_twister.group(1))
+        
+        m_twister_basis = re.search(r'name="twister-plus-price-data-basisPrice" value="([\d\.]+)"', html_text)
+        if m_twister_basis: antes = float(m_twister_basis.group(1))
+
+    if not actual:
+        m_json = re.search(r'"priceAmount":\s*([\d\.]+)', html_text)
+        if m_json: actual = float(m_json.group(1))
+        
+    # SEGURO ANTI-CEROS (Para que nunca vuelva a salir "TOP 0,00€")
+    if not actual or actual <= 0:
+        raise Exception("❌ No se pudo leer el precio exacto (Amazon requiere que el usuario elija talla/color manualmente). Abortando para no publicar a 0€.")
+        
     # 4. IMAGEN
     img_url = None
     img_el = soup.select_one('#landingImage, #imgBlkFront')
@@ -109,7 +111,7 @@ def extraer_datos_amazon_definitivo(asin):
         
     return {
         "titulo": titulo,
-        "precio_actual": f"{actual:.2f}".replace(".", ",") if actual > 0 else "N/A",
+        "precio_actual": f"{actual:.2f}".replace(".", ","),
         "precio_antes": f"{antes:.2f}".replace(".", ",") if antes else None,
         "descuento": descuento,
         "es_prime": bool(soup.select_one('i.a-icon-prime')),
@@ -137,7 +139,7 @@ async def main(url_acortada):
 
     try:
         datos = extraer_datos_amazon_definitivo(asin)
-        print("✅ ¡Datos extraídos como un fantasma!")
+        print(f"✅ ¡Datos extraídos! Precio detectado: {datos['precio_actual']}€")
     except Exception as e:
         print(f"\n❌ FRACASO TOTAL: {e}")
         sys.exit(1)
@@ -145,8 +147,8 @@ async def main(url_acortada):
     # GENERAR TEXTOS
     cabecera = f"🔥 {datos['descuento']} de descuento 🔥" if "%" in datos['descuento'] else "⚡ ¡OFERTA DESTACADA! ⚡"
     
-    txt_precio_x = f"💰 Ahora: {datos['precio_actual']}€" if datos['precio_actual'] != "N/A" else "💰 Precio: Según talla/modelo"
-    txt_precio_tg = f"💰 <b>Precio actual:</b> {datos['precio_actual']}€" if datos['precio_actual'] != "N/A" else "💰 <b>Precio:</b> Según modelo"
+    txt_precio_x = f"💰 Ahora: {datos['precio_actual']}€"
+    txt_precio_tg = f"💰 <b>Precio actual:</b> {datos['precio_actual']}€"
     
     if datos['precio_antes']:
         txt_precio_x += f" (Antes: {datos['precio_antes']}€)"
@@ -171,10 +173,8 @@ async def main(url_acortada):
     )
 
     ruta_img = "chollo_manual.jpg"
-    # Ajuste gráfico para precios ocultos
-    precio_img = datos['precio_actual'] if datos['precio_actual'] != "N/A" else "0,00"
     crear_imagen_chollo(
-        datos['descuento'], precio_img, datos['precio_antes'],
+        datos['descuento'], datos['precio_actual'], datos['precio_antes'],
         ruta_img, es_prime=datos['es_prime']
     )
 
