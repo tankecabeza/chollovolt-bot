@@ -15,7 +15,7 @@ from playwright.async_api import async_playwright
 # Requiere la versión actual de auto_chollovolt.py (con estas funciones)
 from auto_chollovolt import (
     TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, X_STATE,
-    publicar_en_x, parse_precio, JS_EXTRAER, hay_captcha,
+    publicar_en_x, parse_precio, JS_EXTRAER, hay_captcha, generar_enlace_afiliado,
 )
 
 USER_AGENTS = [
@@ -332,6 +332,15 @@ async def main(url_acortada):
     asin = m.group(1)
     print(f"🔗 ASIN: {asin}")
 
+    # Si pegas un enlace corto de SiteStripe (link.amazon / amzn.to) se usa tal cual.
+    # Si pegas cualquier otro (p. ej. el de "Compartir" de la app de Amazon, que NO lleva
+    # tu etiqueta de afiliado), se construye uno propio con tu etiqueta.
+    if any(d in url_acortada for d in ("link.amazon", "amzn.to")):
+        enlace = url_acortada
+    else:
+        enlace = generar_enlace_afiliado(asin) + f"&{PARAMS_VARIANTE}"
+        print("ℹ️ Enlace sin etiqueta de afiliado detectado: se ha generado uno con tu etiqueta.")
+
     # Precios opcionales escritos por ti (los que ves en la pantalla)
     ov_act = num_usuario(os.getenv("PRECIO_ACTUAL", ""))
     ov_ant = num_usuario(os.getenv("PRECIO_ANTES", ""))
@@ -390,7 +399,7 @@ async def main(url_acortada):
         f"{cab_x}\n"
         f"📦 {titulo_x}\n\n"
         f"{linea_x}\n\n"
-        f"🛒 {url_acortada}\n\n"
+        f"🛒 {enlace}\n\n"
         f"{hashtags}\n(Enlace de afiliado)"
     )
 
@@ -404,7 +413,7 @@ async def main(url_acortada):
         f"{cab_tg}\n\n"
         f"📦 <b>Producto:</b> {titulo_tg}\n\n"
         f"{linea_tg}\n\n"
-        f"🛒 <b>Ver oferta aquí:</b> {html.escape(url_acortada)}\n\n"
+        f"🛒 <b>Ver oferta aquí:</b> {html.escape(enlace)}\n\n"
         f"<i>{html.escape(hashtags)}</i>\n<i>(Enlace de afiliado)</i>"
     )
 
