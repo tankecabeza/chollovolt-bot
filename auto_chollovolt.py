@@ -7,6 +7,7 @@ import re
 import sys
 import traceback
 from collections import Counter
+from datetime import datetime
 from itertools import zip_longest
 
 import requests
@@ -24,6 +25,13 @@ def _env_float(nombre, defecto):
         return float(defecto)
 
 
+def _env_bool(nombre, defecto=False):
+    valor = (os.getenv(nombre) or "").strip().lower()
+    if not valor:
+        return defecto
+    return valor in ("1", "true", "si", "sí", "yes")
+
+
 AMAZON_TAG = os.getenv("AMAZON_TAG") or "librospsico08-21"
 X_STATE = os.getenv("X_STATE", "")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
@@ -35,8 +43,17 @@ MAX_DESCUENTO = _env_float("MAX_DESCUENTO", 95)
 MAX_REVISAR = int(_env_float("MAX_REVISAR", 80))
 CONCURRENCIA = int(_env_float("CONCURRENCIA", 4))
 
-# ESCALERA: si no encuentra el 15%, baja al 10%, luego al 5% y por último publica lo que haya (0%)
-ESCALERA = [MIN_DESCUENTO, 10.0, 5.0, 0.0]
+# Hasta qué descuento está dispuesto a bajar el bot si no encuentra el mínimo.
+SUELO_DESCUENTO = _env_float("SUELO_DESCUENTO", 10)
+# Publicar productos SIN descuento verificable ("producto destacado"). Por defecto NO.
+PUBLICAR_SIN_DESCUENTO = _env_bool("PUBLICAR_SIN_DESCUENTO", False)
+# Cuántos candidatos se reconfirman (segunda lectura) antes de publicar.
+MAX_CONFIRMAR = 3
+
+# ESCALERA: [15, 10] por defecto. Los escalones 5% y 0% solo si el suelo lo permite.
+ESCALERA = [MIN_DESCUENTO] + [u for u in (10.0, 5.0) if SUELO_DESCUENTO <= u < MIN_DESCUENTO]
+if PUBLICAR_SIN_DESCUENTO:
+    ESCALERA.append(0.0)
 
 ARCHIVO_HISTORIAL = "historial_publicados.txt"
 USER_AGENT = (
@@ -64,6 +81,10 @@ FUENTES_SECUNDARIAS = [
 
 BLOQUEAR_DOMINIOS = ("amazon-adsystem", "fls-eu.amazon", "google-analytics", "doubleclick")
 RE_ASIN = re.compile(r"/(?:dp|gp/product)/([A-Z0-9]{10})")
+RE_PRECIO = re.compile(r"\d+(?:\.\d{3})*,\d{2}")
+# Etiquetas que delatan un precio SIN IVA (vista "Amazon Business" / empresas)
+RE_SIN_IVA = re.compile(r"sin\s+iva|iva\s+excl|excl\w*\.?\s+(?:de\s+)?iva|iva\s+no\s+incluido", re.I)
+IVA = 1.21  # IVA general en España
 
 MOTIVOS = Counter()  # por qué se descarta cada producto (diagnóstico)
 
@@ -102,7 +123,7 @@ def generar_enlace_afiliado(asin):
 def parse_precio(texto):
     if not texto:
         return None
-    t = texto.replace("\xa0", " ")
+    t = str(texto).replace("\xa0", " ")
     m = re.search(r"\d+(?:\.\d{3})*,\d{2}", t)
     if m:
         return float(m.group().replace(".", "").replace(",", "."))
@@ -112,6 +133,16 @@ def parse_precio(texto):
 
 def fmt_precio(valor):
     return f"{valor:.2f}".replace(".", ",")
+
+
+def sello_hora():
+    """Hora de España en la que se leyó el precio, p. ej. '14:32 del 10/11'."""
+    try:
+        from zoneinfo import ZoneInfo
+        ahora = datetime.now(ZoneInfo("Europe/Madrid"))
+    except Exception:
+        ahora = datetime.now()
+    return ahora.strftime("%H:%M del %d/%m")
 
 
 def intercalar(listas):
@@ -180,11 +211,14 @@ async def recoger_asins(context, url, sem):
             await page.close()
 
 
+# Todas las lecturas de precio se limitan al BLOQUE DE PRECIO de la ficha
+# (nada de buscar en toda la página: podría coger un patrocinado o una variante).
 JS_EXTRAER = """() => {
-  const primero = (sels) => {
+  const txt = (e) => (e && e.textContent ? e.textContent.trim() : '');
+  const primero = (sels, raiz) => {
     for (const s of sels) {
-      const e = document.querySelector(s);
-      if (e && e.textContent && e.textContent.trim()) return e.textContent.trim();
+      const e = (raiz || document).querySelector(s);
+      if (e && txt(e)) return txt(e);
     }
     return null;
   };
@@ -195,29 +229,38 @@ JS_EXTRAER = """() => {
     if (imgUrl && imgUrl.startsWith('data:')) imgUrl = null;
   }
   const centro = document.querySelector('#centerCol');
+  const bloque = document.querySelector('#corePriceDisplay_desktop_feature_div')
+              || document.querySelector('#corePrice_feature_div')
+              || document.querySelector('#apex_desktop');
+  const buybox = document.querySelector('#desktop_buybox') || document.querySelector('#buybox');
+
+  let actual = null, antes = null, badge = null, preciosBloque = [];
+  if (bloque) {
+    actual = primero(['.priceToPay .a-offscreen',
+                      '.a-price:not(.a-text-price) .a-offscreen'], bloque);
+    antes = primero(['.basisPrice .a-offscreen',
+                     '.a-price.a-text-price[data-a-strike="true"] .a-offscreen',
+                     '.a-price.a-text-price .a-offscreen'], bloque);
+    badge = primero(['.savingsPercentage'], bloque);
+    preciosBloque = [...bloque.querySelectorAll('.a-offscreen')].map(txt);
+  } else {
+    actual = primero(['#priceblock_dealprice', '#priceblock_ourprice']);
+    antes = primero(['#listPrice']);
+  }
+
+  const inputAsin = document.querySelector('#ASIN, input[name="ASIN"]');
+  const inputPrecio = document.querySelector('input[name$="[customerVisiblePrice][amount]"]');
+
   return {
     titulo: primero(['#productTitle']),
-    actual: primero([
-      '#corePriceDisplay_desktop_feature_div .priceToPay .a-offscreen',
-      '#corePrice_feature_div .priceToPay .a-offscreen',
-      '.priceToPay .a-offscreen',
-      '#corePriceDisplay_desktop_feature_div .a-price:not(.a-text-price) .a-offscreen',
-      '#corePrice_feature_div .a-price:not(.a-text-price) .a-offscreen',
-      '#priceblock_dealprice', '#priceblock_ourprice'
-    ]),
-    antes: primero([
-      '#corePriceDisplay_desktop_feature_div .basisPrice .a-offscreen',
-      '#corePrice_feature_div .basisPrice .a-offscreen',
-      '.basisPrice .a-offscreen',
-      '#corePriceDisplay_desktop_feature_div .a-price.a-text-price .a-offscreen',
-      '#corePrice_feature_div .a-price.a-text-price .a-offscreen',
-      '.a-price.a-text-price[data-a-strike="true"] .a-offscreen',
-      '#listPrice'
-    ]),
-    badge: primero([
-      '#corePriceDisplay_desktop_feature_div .savingsPercentage',
-      '.savingsPercentage'
-    ]),
+    actual: actual,
+    antes: antes,
+    badge: badge,
+    precios_bloque: preciosBloque,
+    bloque_texto: bloque ? bloque.innerText.slice(0, 2000) : '',
+    buybox_texto: buybox ? buybox.innerText.slice(0, 3000) : '',
+    precio_form: inputPrecio ? inputPrecio.value : null,
+    asin_pagina: inputAsin ? inputAsin.value : null,
     carrito: !!document.querySelector('#add-to-cart-button, #buy-now-button'),
     prime: !!document.querySelector(
       '#buybox i.a-icon-prime, #desktop_buybox i.a-icon-prime, #mir-layout-DELIVERY_BLOCK i.a-icon-prime'
@@ -231,6 +274,15 @@ RE_MINIMO_30D = re.compile(
     r"(?:más|mas)\s+bajo.{0,100}?30\s*d[ií]as.{0,40}?(\d+(?:\.\d{3})*,\d{2})\s*€",
     re.I | re.S,
 )
+
+
+def _es_precio_sin_iva(actual, otros):
+    """True si en la ficha aparece otro precio igual a actual * 1,21 (±2 céntimos).
+
+    Es la firma de leer el precio SIN IVA: p. ej. 114,00 € / 1,21 = 94,21 €.
+    """
+    esperado = actual * IVA
+    return any(abs(esperado - p) <= 0.02 for p in otros if p)
 
 
 async def verificar_producto(context, asin, sem):
@@ -253,13 +305,37 @@ async def verificar_producto(context, asin, sem):
             if not d.get("carrito"):
                 return rechazo("sin_boton_comprar")
 
+            # La ficha debe ser exactamente el ASIN pedido (si no, es otra variante
+            # y el precio leído podría no ser el del enlace que publicamos).
+            asin_pagina = (d.get("asin_pagina") or "").strip().upper()
+            if asin_pagina and asin_pagina != asin:
+                return rechazo("variante_distinta")
+
             actual = parse_precio(d.get("actual"))
             if not actual or actual <= 0:
                 return rechazo("sin_precio_actual")
 
+            # --- FIDELIDAD DEL PRECIO -------------------------------------------
+            # 1) Etiquetas explícitas de "sin IVA" (vista de empresas)
+            zona_iva = f"{d.get('bloque_texto') or ''} {d.get('buybox_texto') or ''}"
+            if RE_SIN_IVA.search(zona_iva):
+                return rechazo("precio_sin_iva")
+
+            # 2) El precio del formulario de compra debe coincidir con el mostrado
+            precio_form = parse_precio(d.get("precio_form"))
+            if precio_form and abs(precio_form - actual) > 0.02:
+                return rechazo("precio_incoherente")
+
             antes = parse_precio(d.get("antes"))
 
-            # Se permite publicar también productos sin descuento verificable
+            # 3) Firma matemática de precio sin IVA: otro precio de la ficha = actual * 1,21
+            otros = [antes, precio_form]
+            otros += [parse_precio(t) for t in (d.get("precios_bloque") or [])]
+            otros += [parse_precio(m) for m in RE_PRECIO.findall(d.get("centro") or "")]
+            if _es_precio_sin_iva(actual, otros):
+                return rechazo("posible_precio_sin_iva")
+            # ---------------------------------------------------------------------
+
             if antes and antes > actual:
                 pct = round((antes - actual) / antes * 100, 1)
                 txt_antes = fmt_precio(antes)
@@ -293,6 +369,7 @@ async def verificar_producto(context, asin, sem):
                 "descuento_porcentaje": pct,
                 "posible_error_precio": flag,
                 "precio_actual": fmt_precio(actual),
+                "precio_actual_num": actual,
                 "precio_antes": txt_antes,
                 "imagen_original": d.get("imagen"),
                 "es_prime": bool(d.get("prime")),
@@ -305,6 +382,7 @@ async def verificar_producto(context, asin, sem):
 
 
 async def buscar_chollo(context, historial):
+    """Devuelve una lista ORDENADA de candidatos (el mejor primero)."""
     sem = asyncio.Semaphore(CONCURRENCIA)
     todas = FUENTES_PRIORITARIAS + FUENTES_SECUNDARIAS
     resultados = await asyncio.gather(*(recoger_asins(context, u, sem) for u in todas))
@@ -327,9 +405,10 @@ async def buscar_chollo(context, historial):
         res = await asyncio.gather(*(verificar_producto(context, a, sem) for a in lote))
         validos += [r for r in res if r]
 
-        # Parar antes si ya hay algo que cumple la exigencia inicial
+        # Parar cuando ya hay un par de candidatos que cumplen la exigencia inicial
+        # (así queda alguno de reserva por si falla la reconfirmación).
         buenos = [r for r in validos if r["descuento_porcentaje"] >= ESCALERA[0]]
-        if buenos or any(r["posible_error_precio"] for r in validos):
+        if len(buenos) >= 2:
             break
 
     print(f"📊 Motivos de descarte: {dict(MOTIVOS) if MOTIVOS else 'ninguno'}")
@@ -337,18 +416,23 @@ async def buscar_chollo(context, historial):
     if not validos:
         raise SinChollo("Ningún producto revisado se pudo verificar (ver motivos de descarte arriba).")
 
-    elegido = None
+    ranking, vistos = [], set()
     for umbral in ESCALERA:
-        cand = [c for c in validos if c["descuento_porcentaje"] >= umbral]
-        if cand:
-            cand.sort(key=lambda c: (c["posible_error_precio"], c["descuento_porcentaje"]), reverse=True)
-            if umbral != ESCALERA[0]:
-                print(f"ℹ️ Bajando el listón a {umbral:.0f}% para asegurar publicación.")
-            elegido = cand[0]
-            break
+        cand = [c for c in validos if c["descuento_porcentaje"] >= umbral and c["asin"] not in vistos]
+        cand.sort(key=lambda c: (c["posible_error_precio"], c["descuento_porcentaje"]), reverse=True)
+        if cand and umbral != ESCALERA[0] and not ranking:
+            print(f"ℹ️ Bajando el listón a {umbral:.0f}%.")
+        for c in cand:
+            c["umbral"] = umbral
+            ranking.append(c)
+            vistos.add(c["asin"])
 
-    print(f"🏆 Elegido {elegido['asin']} para publicar.")
-    return elegido
+    if not ranking:
+        raise SinChollo(
+            f"Ningún producto verificado llega al descuento mínimo ({ESCALERA[-1]:.0f}%). "
+            "Mejor no publicar que publicar una oferta que no lo es."
+        )
+    return ranking
 
 
 # ==============================================================================
@@ -368,7 +452,8 @@ def cargar_fuente(tamano, negrita=False):
     return ImageFont.load_default()
 
 
-def crear_imagen_chollo(descuento, precio_actual, precio_antes, ruta_salida, es_prime=False, posible_error=False):
+def crear_imagen_chollo(descuento, precio_actual, precio_antes, ruta_salida,
+                        es_prime=False, posible_error=False, sello=None):
     """descuento: texto tipo '-27%' o None si no hay descuento verificable."""
     W, H = 800, 440
     img = Image.new("RGB", (W, H), color=(255, 255, 255))
@@ -379,6 +464,7 @@ def crear_imagen_chollo(descuento, precio_actual, precio_antes, ruta_salida, es_
     f_gris = cargar_fuente(36, negrita=False)
     f_prime = cargar_fuente(52, negrita=True)
     f_alerta = cargar_fuente(36, negrita=True)
+    f_peq = cargar_fuente(20, negrita=False)
 
     x_precio = 45
     if descuento:
@@ -410,6 +496,11 @@ def crear_imagen_chollo(descuento, precio_actual, precio_antes, ruta_salida, es_
 
     if posible_error:
         draw.text((160, 335), "¡POSIBLE ERROR DE PRECIO!", font=f_alerta, fill=(204, 12, 57))
+
+    if sello:
+        texto_sello = f"Precio a las {sello} · puede variar"
+        bb = draw.textbbox((0, 0), texto_sello, font=f_peq)
+        draw.text((W - 25 - (bb[2] - bb[0]), H - 42), texto_sello, font=f_peq, fill=(120, 123, 123))
 
     draw.rectangle([(2, 2), (W - 3, H - 3)], outline=(225, 228, 228), width=3)
     img.save(ruta_salida, quality=95)
@@ -517,6 +608,33 @@ async def publicar_en_x(context, texto_x, ruta_img):
 # ==============================================================================
 # EJECUCIÓN PRINCIPAL
 # ==============================================================================
+async def reconfirmar(ctx_amazon, ranking):
+    """Segunda lectura independiente del precio justo antes de publicar.
+
+    Solo se publica un producto si, al volver a cargar su ficha, el precio sigue
+    siendo el mismo y el descuento sigue cumpliendo el umbral con el que se eligió.
+    """
+    sem = asyncio.Semaphore(1)
+    for cand in ranking[:MAX_CONFIRMAR]:
+        print(f"🔁 Reconfirmando {cand['asin']} antes de publicar...")
+        await asyncio.sleep(random.uniform(3.0, 6.0))
+        nuevo = await verificar_producto(ctx_amazon, cand["asin"], sem)
+        if not nuevo:
+            print("   ❌ La segunda lectura no supera las comprobaciones; paso al siguiente.")
+            continue
+        if abs(nuevo["precio_actual_num"] - cand["precio_actual_num"]) > 0.01:
+            print(
+                f"   ❌ El precio ha cambiado ({cand['precio_actual']} → {nuevo['precio_actual']}); "
+                "paso al siguiente."
+            )
+            continue
+        if nuevo["descuento_porcentaje"] < cand["umbral"]:
+            print("   ❌ El descuento ya no cumple el umbral; paso al siguiente.")
+            continue
+        return nuevo
+    return None
+
+
 async def ejecutar_bot():
     tg_cfg = bool(TELEGRAM_TOKEN and TELEGRAM_CHAT_ID)
     estado_x = None
@@ -528,6 +646,7 @@ async def ejecutar_bot():
     x_cfg = estado_x is not None
 
     print(f"⚙️ Canales: Telegram={'sí' if tg_cfg else 'NO'} | X={'sí' if x_cfg else 'NO'}")
+    print(f"⚙️ Escalera de descuentos: {ESCALERA} | publicar sin descuento: {'sí' if PUBLICAR_SIN_DESCUENTO else 'NO'}")
     if not tg_cfg and not x_cfg:
         print("::error::No hay ningún canal configurado (faltan los secrets).")
         return False
@@ -535,27 +654,39 @@ async def ejecutar_bot():
     historial = cargar_historial()
     print(f"🗂️ Historial: {len(historial)} productos ya publicados.")
 
+    opciones_ctx = dict(
+        user_agent=USER_AGENT,
+        viewport={"width": 1280, "height": 800},
+        locale="es-ES",
+        timezone_id="Europe/Madrid",
+        extra_http_headers={"Accept-Language": "es-ES,es;q=0.9"},
+    )
+
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         try:
-            context = await browser.new_context(
-                storage_state=estado_x,
-                user_agent=USER_AGENT,
-                viewport={"width": 1280, "height": 800},
-                locale="es-ES",
-            )
+            # Contexto de Amazon LIMPIO (sin las cookies de X): navegación de visitante normal.
+            ctx_amazon = await browser.new_context(**opciones_ctx)
+            ctx_x = await browser.new_context(storage_state=estado_x, **opciones_ctx) if x_cfg else None
 
             try:
-                chollo = await buscar_chollo(context, historial)
+                ranking = await buscar_chollo(ctx_amazon, historial)
             except SinChollo as exc:
                 print(f"::warning::NADA PUBLICADO en este pase: {exc}")
                 return True
 
+            chollo = await reconfirmar(ctx_amazon, ranking)
+            if not chollo:
+                print("::warning::NADA PUBLICADO en este pase: ningún candidato superó la reconfirmación del precio.")
+                return True
+
             asin = chollo["asin"]
+            print(f"🏆 Elegido {asin} para publicar.")
             enlace = generar_enlace_afiliado(asin)
             flag = chollo["posible_error_precio"]
             titulo = chollo["titulo_completo"]
             desc = chollo["descuento"]  # '-27%' o None
+            sello = sello_hora()
 
             txt_precio_x = f"💰 Ahora: {chollo['precio_actual']}€"
             txt_precio_tg = f"💰 <b>Precio:</b> {chollo['precio_actual']}€"
@@ -569,7 +700,7 @@ async def ejecutar_bot():
             elif desc:
                 cabecera = f"🔥 {desc} de descuento 🔥"
             else:
-                cabecera = "⭐ PRODUCTO DESTACADO ⭐"  # sin descuento verificable: no se vende como oferta
+                cabecera = "⭐ PRODUCTO DESTACADO ⭐"  # solo si PUBLICAR_SIN_DESCUENTO=1
 
             hashtags = "#chollos #amazon #ofertas" if desc else "#amazon #recomendado"
 
@@ -578,6 +709,7 @@ async def ejecutar_bot():
                 f"{cabecera}\n"
                 f"📦 {titulo_x}\n"
                 f"{txt_precio_x}\n"
+                f"🕒 Precio a las {sello}; puede variar\n"
                 f"🛒 {enlace}\n\n"
                 f"{hashtags}\n"
                 f"(Enlace de afiliado)"
@@ -588,6 +720,7 @@ async def ejecutar_bot():
                 f"{cabecera}\n\n"
                 f"📦 <b>Producto:</b> {html.escape(titulo[:180])}\n\n"
                 f"{txt_precio_tg}\n"
+                f"🕒 <i>Precio a las {sello}; puede variar.</i>\n"
                 f"{aviso}\n"
                 f"🛒 <b>Comprar aquí:</b> {html.escape(enlace)}\n\n"
                 f"<i>Como afiliado de Amazon, obtengo ingresos por las compras adscritas que cumplen los requisitos aplicables.</i>"
@@ -595,14 +728,14 @@ async def ejecutar_bot():
 
             ruta_img = crear_imagen_chollo(
                 desc, chollo["precio_actual"], chollo["precio_antes"],
-                "chollo.jpg", es_prime=chollo["es_prime"], posible_error=flag,
+                "chollo.jpg", es_prime=chollo["es_prime"], posible_error=flag, sello=sello,
             )
 
             resultados = {}
             if tg_cfg:
                 resultados["Telegram"] = publicar_en_telegram(chollo["imagen_original"], ruta_img, texto_telegram)
-            if x_cfg:
-                resultados["X"] = await publicar_en_x(context, texto_x, ruta_img)
+            if ctx_x is not None:
+                resultados["X"] = await publicar_en_x(ctx_x, texto_x, ruta_img)
 
             print(f"📬 Resultado: {resultados}")
             if any(resultados.values()):
