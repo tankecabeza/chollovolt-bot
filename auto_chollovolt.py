@@ -8,7 +8,9 @@ import sys
 import traceback
 from collections import Counter
 from datetime import datetime
+from io import BytesIO
 from itertools import zip_longest
+import textwrap
 
 import requests
 from PIL import Image, ImageDraw, ImageFont
@@ -41,7 +43,7 @@ MIN_DESCUENTO = _env_float("MIN_DESCUENTO", 15)
 UMBRAL_ERROR_PRECIO = _env_float("UMBRAL_ERROR_PRECIO", 50)
 MAX_DESCUENTO = _env_float("MAX_DESCUENTO", 95)
 MAX_REVISAR = int(_env_float("MAX_REVISAR", 80))
-CONCURRENCIA = int(_env_float("CONCURRENCIA", 4))
+CONCURRENCIA = int(_env_float("CONCURRENCIA", 2))
 
 # Hasta qué descuento está dispuesto a bajar el bot si no encuentra el mínimo.
 SUELO_DESCUENTO = _env_float("SUELO_DESCUENTO", 10)
@@ -49,6 +51,16 @@ SUELO_DESCUENTO = _env_float("SUELO_DESCUENTO", 10)
 PUBLICAR_SIN_DESCUENTO = _env_bool("PUBLICAR_SIN_DESCUENTO", False)
 # Cuántos candidatos se reconfirman (segunda lectura) antes de publicar.
 MAX_CONFIRMAR = 3
+
+# Si no se puede verificar NINGUNA oferta (p. ej. Amazon bloquea con CAPTCHA), publicar igualmente
+# una recomendación SIN precio ni descuento. Nunca se inventa un dato.
+PUBLICAR_SIEMPRE = _env_bool("PUBLICAR_SIEMPRE", True)
+# Si hay tantos CAPTCHA seguidos, Amazon está bloqueando la IP: se deja de insistir.
+MAX_CAPTCHAS_SEGUIDOS = 5
+# Proxy opcional (solo para Amazon), por si la IP de GitHub está bloqueada.
+PROXY_SERVER = os.getenv("PROXY_SERVER", "")
+PROXY_USER = os.getenv("PROXY_USER", "")
+PROXY_PASS = os.getenv("PROXY_PASS", "")
 
 # ESCALERA: [15, 10] por defecto. Los escalones 5% y 0% solo si el suelo lo permite.
 ESCALERA = [MIN_DESCUENTO] + [u for u in (10.0, 5.0) if SUELO_DESCUENTO <= u < MIN_DESCUENTO]
@@ -87,6 +99,9 @@ RE_SIN_IVA = re.compile(r"sin\s+iva|iva\s+excl|excl\w*\.?\s+(?:de\s+)?iva|iva\s+
 IVA = 1.21  # IVA general en España
 
 MOTIVOS = Counter()  # por qué se descarta cada producto (diagnóstico)
+ESTADO = {"captchas_seguidos": 0}
+INFO_LISTADO = {}   # asin -> {"titulo": ..., "imagen": ...} sacado de las páginas de listado
+ORDEN_LISTADO = []  # asins en el orden en que se recogieron
 
 
 class SinChollo(Exception):
@@ -194,14 +209,33 @@ async def recoger_asins(context, url, sem):
                 pass
             await page.mouse.wheel(0, 2500)
             await page.wait_for_timeout(700)
-            hrefs = await page.eval_on_selector_all(
-                "a[href*='/dp/'], a[href*='/gp/product/']", "els => els.map(e => e.href)"
+            items = await page.eval_on_selector_all(
+                "a[href*='/dp/'], a[href*='/gp/product/']",
+                """els => els.map(e => {
+                    const im = e.querySelector('img');
+                    const src = im ? (im.currentSrc || im.src || '') : '';
+                    return {href: e.href,
+                            alt: im ? (im.alt || '') : '',
+                            texto: (e.getAttribute('aria-label') || e.textContent || '').trim().slice(0, 300),
+                            imagen: src.startsWith('http') ? src : ''};
+                })""",
             )
             asins = []
-            for href in hrefs:
-                m = RE_ASIN.search(href or "")
-                if m and m.group(1) not in asins:
-                    asins.append(m.group(1))
+            for it in items:
+                m = RE_ASIN.search(it.get("href") or "")
+                if not m:
+                    continue
+                a = m.group(1)
+                if a not in asins:
+                    asins.append(a)
+                info = INFO_LISTADO.setdefault(a, {"titulo": "", "imagen": ""})
+                if not info["titulo"]:
+                    for cand in (it.get("alt"), it.get("texto")):
+                        if titulo_valido(cand):
+                            info["titulo"] = cand.strip()
+                            break
+                if not info["imagen"] and it.get("imagen"):
+                    info["imagen"] = it["imagen"]
             print(f"🔎 {len(asins):>3} productos en {url}")
             return asins
         except Exception as exc:
@@ -248,11 +282,14 @@ JS_EXTRAER = """() => {
     antes = primero(['#listPrice']);
   }
 
+  if (!actual && buybox) actual = primero(['#price_inside_buybox'], buybox);
+
   const inputAsin = document.querySelector('#ASIN, input[name="ASIN"]');
   const inputPrecio = document.querySelector('input[name$="[customerVisiblePrice][amount]"]');
 
   return {
     titulo: primero(['#productTitle']),
+    hay_bloque: !!bloque,
     actual: actual,
     antes: antes,
     badge: badge,
@@ -288,12 +325,14 @@ def _es_precio_sin_iva(actual, otros):
 async def verificar_producto(context, asin, sem):
     async with sem:
         # Micro-pausa para evitar los CAPTCHAs que saltan al entrar a Amazon
-        await asyncio.sleep(random.uniform(1.0, 2.5))
+        await asyncio.sleep(random.uniform(2.0, 4.5))
         page = await nueva_pagina_amazon(context)
         try:
             await page.goto(f"https://www.amazon.es/dp/{asin}", wait_until="domcontentloaded", timeout=30000)
             if await hay_captcha(page):
+                ESTADO["captchas_seguidos"] += 1
                 return rechazo("captcha_amazon")
+            ESTADO["captchas_seguidos"] = 0
             try:
                 await page.wait_for_selector("#productTitle", timeout=8000)
             except Exception:
@@ -313,6 +352,8 @@ async def verificar_producto(context, asin, sem):
 
             actual = parse_precio(d.get("actual"))
             if not actual or actual <= 0:
+                muestra = " ".join((d.get("bloque_texto") or "").split())[:80]
+                print(f"   ℹ️ {asin}: sin precio legible (bloque={d.get('hay_bloque')}, texto='{muestra}')")
                 return rechazo("sin_precio_actual")
 
             # --- FIDELIDAD DEL PRECIO -------------------------------------------
@@ -391,6 +432,7 @@ async def buscar_chollo(context, historial):
     ordenados = intercalar(resultados[:n_prio])
     ya = set(ordenados)
     ordenados += [a for a in intercalar(resultados[n_prio:]) if a not in ya]
+    ORDEN_LISTADO.extend(ordenados)
     pendientes = [a for a in ordenados if a not in historial][:MAX_REVISAR]
     print(f"📦 {len(ordenados)} productos recogidos, {len(pendientes)} nuevos.")
 
@@ -404,6 +446,10 @@ async def buscar_chollo(context, historial):
         lote = pendientes[i:i + CONCURRENCIA]
         res = await asyncio.gather(*(verificar_producto(context, a, sem) for a in lote))
         validos += [r for r in res if r]
+
+        if ESTADO["captchas_seguidos"] >= MAX_CAPTCHAS_SEGUIDOS:
+            print(f"🛑 Amazon bloquea con CAPTCHA ({ESTADO['captchas_seguidos']} seguidos); dejo de verificar.")
+            break
 
         # Parar cuando ya hay un par de candidatos que cumplen la exigencia inicial
         # (así queda alguno de reserva por si falla la reconfirmación).
@@ -608,6 +654,116 @@ async def publicar_en_x(context, texto_x, ruta_img):
 # ==============================================================================
 # EJECUCIÓN PRINCIPAL
 # ==============================================================================
+def titulo_valido(t):
+    t = (t or "").strip()
+    return 15 <= len(t) <= 200 and not re.search(r"estrellas|stars|€", t, re.I)
+
+
+async def calentar_sesion(context):
+    """Visita la portada como un usuario normal antes de entrar en las fichas."""
+    page = await nueva_pagina_amazon(context)
+    try:
+        await page.goto("https://www.amazon.es/", wait_until="domcontentloaded", timeout=30000)
+        if await hay_captcha(page):
+            print("⚠️ CAPTCHA ya en la portada de Amazon: la IP de este runner está marcada.")
+            return
+        try:
+            if await page.locator("#sp-cc-accept").count():
+                await page.locator("#sp-cc-accept").click(timeout=1500)
+        except Exception:
+            pass
+        await page.wait_for_timeout(random.randint(1500, 3500))
+    except Exception as exc:
+        print(f"⚠️ No se pudo calentar la sesión: {exc}")
+    finally:
+        await page.close()
+
+
+def elegir_destacado(historial):
+    """Producto del listado (título real) para publicar SIN precio ni descuento."""
+    for asin in ORDEN_LISTADO:
+        if asin in historial:
+            continue
+        info = INFO_LISTADO.get(asin) or {}
+        if not titulo_valido(info.get("titulo")):
+            continue
+        return {
+            "asin": asin,
+            "titulo_completo": info["titulo"],
+            "imagen_original": info.get("imagen") or None,
+            "sin_precio": True,
+        }
+    return None
+
+
+def descargar_imagen(url, ruta):
+    if not url:
+        return None
+    candidatos = [re.sub(r"\._[^/]*_\.", ".", url), url]  # primero la versión grande
+    for u in dict.fromkeys(candidatos):
+        try:
+            r = requests.get(u, timeout=15, headers={"User-Agent": USER_AGENT})
+            if r.status_code != 200 or len(r.content) < 2000:
+                continue
+            Image.open(BytesIO(r.content)).convert("RGB").save(ruta, quality=92)
+            return ruta
+        except Exception:
+            continue
+    return None
+
+
+def crear_imagen_destacado(titulo, ruta_salida):
+    W, H = 800, 440
+    img = Image.new("RGB", (W, H), color=(255, 255, 255))
+    draw = ImageDraw.Draw(img)
+    draw.text((45, 40), "Tendencia en Amazon", font=cargar_fuente(48, negrita=True), fill=(15, 17, 17))
+    y = 130
+    for linea in textwrap.wrap(titulo, 32)[:3]:
+        draw.text((45, y), linea, font=cargar_fuente(34), fill=(86, 89, 89))
+        y += 48
+    draw.text((45, 350), "Consulta el precio actual en Amazon", font=cargar_fuente(30, negrita=True), fill=(0, 113, 197))
+    draw.rectangle([(2, 2), (W - 3, H - 3)], outline=(225, 228, 228), width=3)
+    img.save(ruta_salida, quality=95)
+    return ruta_salida
+
+
+async def publicar_destacado(chollo, tg_cfg, ctx_x):
+    """Publicación sin precio ni descuento: solo producto + enlace. No afirma nada que no se haya leído."""
+    asin = chollo["asin"]
+    titulo = chollo["titulo_completo"]
+    enlace = generar_enlace_afiliado(asin)
+    print(f"⭐ Publicando recomendación SIN precio: {asin}")
+
+    ruta_img = descargar_imagen(chollo.get("imagen_original"), "chollo.jpg") or crear_imagen_destacado(titulo, "chollo.jpg")
+
+    titulo_x = titulo[:90].rstrip() + ("…" if len(titulo) > 90 else "")
+    texto_x = (
+        f"⭐ TENDENCIA EN AMAZON ⭐\n"
+        f"📦 {titulo_x}\n"
+        f"🔎 Consulta el precio actual en Amazon\n"
+        f"🛒 {enlace}\n\n"
+        f"#amazon #recomendado\n"
+        f"(Enlace de afiliado)"
+    )
+    texto_telegram = (
+        f"⭐ TENDENCIA EN AMAZON ⭐\n\n"
+        f"📦 <b>Producto:</b> {html.escape(titulo[:180])}\n\n"
+        f"🔎 Consulta el precio actual en Amazon\n\n"
+        f"🛒 <b>Ver aquí:</b> {html.escape(enlace)}\n\n"
+        f"<i>Como afiliado de Amazon, obtengo ingresos por las compras adscritas que cumplen los requisitos aplicables.</i>"
+    )
+
+    resultados = {}
+    if tg_cfg:
+        resultados["Telegram"] = publicar_en_telegram(chollo.get("imagen_original"), ruta_img, texto_telegram)
+    if ctx_x is not None:
+        resultados["X"] = await publicar_en_x(ctx_x, texto_x, ruta_img)
+    print(f"📬 Resultado: {resultados}")
+    if any(resultados.values()):
+        guardar_en_historial(asin)
+    return all(resultados.values())
+
+
 async def reconfirmar(ctx_amazon, ranking):
     """Segunda lectura independiente del precio justo antes de publicar.
 
@@ -663,21 +819,42 @@ async def ejecutar_bot():
     )
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
+        browser = await p.chromium.launch(
+            headless=True, args=["--disable-blink-features=AutomationControlled"]
+        )
         try:
             # Contexto de Amazon LIMPIO (sin las cookies de X): navegación de visitante normal.
-            ctx_amazon = await browser.new_context(**opciones_ctx)
+            extra = {}
+            if PROXY_SERVER:
+                extra["proxy"] = {"server": PROXY_SERVER}
+                if PROXY_USER:
+                    extra["proxy"].update(username=PROXY_USER, password=PROXY_PASS)
+                print("🧭 Amazon se consulta a través del proxy configurado.")
+            ctx_amazon = await browser.new_context(**opciones_ctx, **extra)
+            await ctx_amazon.add_init_script(
+                "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
+            )
             ctx_x = await browser.new_context(storage_state=estado_x, **opciones_ctx) if x_cfg else None
 
+            await calentar_sesion(ctx_amazon)
+
+            chollo = None
             try:
                 ranking = await buscar_chollo(ctx_amazon, historial)
+                chollo = await reconfirmar(ctx_amazon, ranking)
+                if not chollo:
+                    print("::warning::Ningún candidato superó la reconfirmación del precio.")
             except SinChollo as exc:
-                print(f"::warning::NADA PUBLICADO en este pase: {exc}")
-                return True
+                print(f"::warning::Sin oferta verificable en este pase: {exc}")
 
-            chollo = await reconfirmar(ctx_amazon, ranking)
+            if not chollo and PUBLICAR_SIEMPRE:
+                chollo = elegir_destacado(historial)
+                if chollo:
+                    return await publicar_destacado(chollo, tg_cfg, ctx_x)
+                print("::warning::No hay ni un producto con título legible en los listados.")
+
             if not chollo:
-                print("::warning::NADA PUBLICADO en este pase: ningún candidato superó la reconfirmación del precio.")
+                print("::warning::NADA PUBLICADO en este pase.")
                 return True
 
             asin = chollo["asin"]
