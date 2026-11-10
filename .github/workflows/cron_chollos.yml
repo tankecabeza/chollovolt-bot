@@ -68,7 +68,12 @@ jobs:
           UMBRAL_ERROR_PRECIO: '50'      # desde este % se marca "posible error de precio"
           MAX_DESCUENTO: '95'            # por encima se descarta (probable fallo de lectura)
           MAX_REVISAR: '80'              # productos a verificar por ejecución
-          CONCURRENCIA: '4'              # páginas de Amazon abiertas a la vez
+          CONCURRENCIA: '2'              # páginas de Amazon abiertas a la vez (menos = menos CAPTCHAs)
+          PUBLICAR_SIEMPRE: '1'          # si no hay oferta verificable, publica una recomendación SIN precio
+          # Proxy opcional solo para Amazon (déjalos sin crear si no usas proxy)
+          PROXY_SERVER: ${{ secrets.PROXY_SERVER }}
+          PROXY_USER: ${{ secrets.PROXY_USER }}
+          PROXY_PASS: ${{ secrets.PROXY_PASS }}
         run: python auto_chollovolt.py
 
       - name: 7. Subir captura si existe
